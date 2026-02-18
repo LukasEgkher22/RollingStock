@@ -62,11 +62,17 @@ function aggregate_train_routes(df::DataFrame)
         to_stations = Set(sub_df.ToStation)
         
         # start_st is the one that appears in FromStation but never in ToStation, end_st is the opposite
-        start_st = collect(setdiff(from_stations, to_stations))
-        end_st = collect(setdiff(to_stations, from_stations))
+        # using first() so it is a "scalar" and doesn't crash the NamedTuple.
+        diff_start = setdiff(from_stations, to_stations)
+        diff_end   = setdiff(to_stations, from_stations)
+        
+        # Fallback logic: if it's a circular route, setdiff might be empty.
+        # Otherwise, take the first element of the difference.
+        start_st = isempty(diff_start) ? first(from_stations) : first(diff_start)
+        end_st   = isempty(diff_end)   ? first(to_stations)   : first(diff_end)
         
         # build the full route as a path from start to end
-        path = [start_st]
+        path = [String(start_st)]
         current = start_st
         temp_df = copy(sub_df)
         
@@ -81,14 +87,10 @@ function aggregate_train_routes(df::DataFrame)
             # delete the used row to avoid loops
             deleteat!(temp_df, idx)
         end
-        
+            
         full_route_string = join(path, "-")
         
         return (
-            Operator        = sub_df.Operator[1],
-            TrainCategory   = sub_df.TrainCategory[1],
-            TrainNumber     = sub_df.TrainNumber[1],
-            DayType         = sub_df.DayType[1],
             StartStation    = start_st,
             EndStation      = end_st,
             MaxPassengerNum = max_p,
