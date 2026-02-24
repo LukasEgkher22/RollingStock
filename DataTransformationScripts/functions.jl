@@ -59,9 +59,7 @@ end
 
 
 """
-Reads the timetable XML file and processes train entries to create a DataFrame containing 
-segments between consecutive stop points. Each row represents a journey segment from one stop to the 
-next, including relevant train and timing information.
+Reads the timetable XML file and saves a DataFrame from it.
 
 # Arguments
 - `file_path::AbstractString`: Path to the timetable XML file to parse
@@ -70,18 +68,17 @@ next, including relevant train and timing information.
 - `filename::String`: The path/name for the CSV file if saving
 
 # Returns
-- `DataFrame`: A DataFrame with columns:
-  - `TrainCategory::String`: The train category extracted from the trainID (e.g., "EX" from "DSB-EX-1199")
-  - `TrainID::String`: The train identifier (e.g., "1199" from "DSB-EX-1199")
-  - `FromStation::String`: The departure station code (posID without country code suffix)
-  - `Departure::String`: The departure time from the source station
-  - `ToStation::String`: The arrival station code (posID without country code suffix)
-  - `Arrival::String`: The arrival time at the destination station
+
+    - `TrainCategory::String`: The train category extracted from the trainID (e.g., "EX" from "DSB-EX-1199")
+    - `TrainID::String`: The train identifier (e.g., "1199" from "DSB-EX-1199")
+    - `Station::String`: The station code (posID without country code suffix)
+    - `Arrival::String`: The arrival time at the station
+    - `Departure::String`: The departure time from the station
+    - `Type::String`: The entry type (e.g., "stop", "pass")
 
 # Details
 - Parses the trainID attribute in the format "OPERATOR-CATEGORY-TRAINID" (e.g., "DSB-EX-1199")
 - Removes country code suffixes from station identifiers (e.g., "/86" from posID)
-- Creates segments by pairing consecutive "stop" entries within each train
 - Handles cases where trainID components may be missing by using "Unknown" as fallback
 """
 function parse_timetable_xml(file_path::AbstractString, target_date::Union{AbstractString, Nothing} = "2026-06-02"; save_to_csv::Bool = false, filename::String = "timetable_data.csv")
@@ -90,53 +87,49 @@ function parse_timetable_xml(file_path::AbstractString, target_date::Union{Abstr
 
     # Iterate through each <train> element
     for train_node in findall("//train", root(doc))
-
-        # Date filter since timetable xml file contains also the 3rd of June
+        
+        # Date Filter Logic
+        # The <service> tag is nested: train -> timetableentries -> entry -> composition -> service
         if !isnothing(target_date)
             service_node = findfirst(".//service", train_node)
             
-            # If date doesn't match, or service info is missing, skip this train
             if isnothing(service_node) || service_node["startdate"] != target_date
                 continue 
             end
         end
         
-        # Extract Train Category and TrainID from the trainID attribute
-        # Based on: "DSB-category-trainid", Example: "DSB-EX-1199"
+        # Extract Train Metadata
         full_id = train_node["trainID"]
         parts = split(full_id, "-")
+        # Example: DSB-EX-1198 -> parts[2]="EX", parts[3]="1198"
         train_category = length(parts) >= 2 ? parts[2] : "Unknown"
         train_id_val   = length(parts) >= 3 ? parts[3] : "Unknown"
 
-        # Find all <entry> tags within this train that are of type "stop"
-        # We use .//entry to search within the current train node
-        stop_entries = findall(".//entry[@type='stop']", train_node)
+        # Find ALL entries that have a 'type' attribute (skipping the header entry)
+        entries = findall(".//entry[@type]", train_node)
 
-        # Create segments by pairing consecutive stops
-        for i in 1:(length(stop_entries) - 1)
-            from_node = stop_entries[i]
-            to_node   = stop_entries[i+1]
+        for entry_node in entries
+            # Extract posID and strip the country suffix (e.g., "HMB/80" -> "HMB")
+            st_raw = haskey(entry_node, "posID") ? entry_node["posID"] : ""
+            st = split(st_raw, "/")[1]
 
-            # Extract and clean posID (remove /86 country code)
-            from_st_raw = from_node["posID"]
-            to_st_raw   = to_node["posID"]
-            
-            from_st = split(from_st_raw, "/")[1]
-            to_st   = split(to_st_raw, "/")[1]
-
-            # Create the row
+            # Create the row using haskey/get logic to prevent errors if attributes are missing
             row = (
                 TrainCategory = String(train_category),
-                TrainID       = String(train_id_val),
-                FromStation   = String(from_st),
-                Departure     = from_node["departure"],
-                ToStation     = String(to_st),
-                Arrival       = to_node["arrival"]
+                TrainId       = String(train_id_val),
+                Station       = String(st),
+                Arrival       = haskey(entry_node, "arrival") ? entry_node["arrival"] : "",
+                Departure     = haskey(entry_node, "departure") ? entry_node["departure"] : "",
+                Type          = haskey(entry_node, "type") ? entry_node["type"] : ""
             )
             push!(data_rows, row)
         end
     end
 
+    if isempty(data_rows)
+        return DataFrame()
+    end
+    
     df = DataFrame(data_rows)
     
     if save_to_csv
@@ -158,14 +151,15 @@ function build_route_map(df_timetable::DataFrame; save_to_csv::Bool = false, fil
     route_map = Dict{Tuple{String, String}, Vector{String}}()
     
     # Group by train to get the segments in order
-    for (key, subdf) in pairs(groupby(df_timetable, [:TrainCategory, :TrainID]))
+    for (key, subdf) in pairs(groupby(df_timetable, [:TrainCategory, :TrainId]))
         if isempty(subdf) continue end
         
-        # Collect stations in order: All FromStations + the very last ToStation
-        path = copy(subdf.FromStation)
-        push!(path, subdf.ToStation[end])
+        # Filter to only include stops and collect stations in order
+        stops = filter(row -> row.Type == "stop", subdf)
+        if isempty(stops) continue end
         
-        route_map[(String(key.TrainCategory), String(key.TrainID))] = path
+        path = stops.Station
+        route_map[(String(key.TrainCategory), String(key.TrainId))] = path
     end
 
     if save_to_csv
@@ -175,7 +169,7 @@ function build_route_map(df_timetable::DataFrame; save_to_csv::Bool = false, fil
         csv_df[!, "TrainCategory"] = [
             k[1] for k in keys(route_map)
         ]
-        csv_df[!, "TrainID"] = [
+        csv_df[!, "TrainId"] = [
             k[2] for k in keys(route_map)
         ]
         
@@ -190,50 +184,117 @@ function build_route_map(df_timetable::DataFrame; save_to_csv::Bool = false, fil
 
     return route_map
 end
+"""
+Merge timetable data with passenger demand information by mapping passenger segments to individual stop-to-stop legs.
+
+This function performs a three-step process:
+1. Consolidates passenger demand data by skipping intermediate "pass" stations, creating merged segments from stop to stop stations only.
+2. Maps these consolidated segments to individual stop-to-stop legs defined in the timetable.
+3. Distributes passenger demand across all intermediate legs within a segment.
+
+# Arguments
+- `df_timetable::DataFrame`: Timetable data containing columns `TrainCategory`, `TrainId`, `Station`, `Type` ("stop" or "pass"), `Departure`, and `Arrival`.
+- `df_passenger::DataFrame`: Passenger demand data containing columns `TrainCategory`, `TrainId`, `FromStation`, `ToStation`, and `PassengerNum`.
+- `save_to_csv::Bool = false`: If true, saves the merged result to a CSV file.
+- `filename::String = "merged_data.csv"`: Output filename when `save_to_csv` is true.
+
+# Returns
+- `DataFrame`: A dataframe with columns `TrainCategory`, `TrainId`, `FromStation`, `DepartureFromStation`, `ToStation`, `ArrivalToStation`, and `Demand`, containing one row per stop-to-stop leg with assigned passenger demand.
+
+# Notes
+- Issues a warning if passenger demand changes at pass stations (data inconsistency).
+- Segments with stations not found in the timetable are filtered out.
+"""
 
 function merge_timetable_with_demand(df_timetable::DataFrame, df_passenger::DataFrame; save_to_csv::Bool = false, filename::String = "merged_data.csv")
-    # 1. Build the map
-    routes = build_route_map(df_timetable)
-    
-    # 2. Add a column for passengers, initialized to 0
-    df_timetable.PassengerNum .= 0
+    # Clean types
+    tt = copy(df_timetable)
+    ps = copy(df_passenger)
+    tt.TrainId = string.(tt.TrainId)
+    ps.TrainId = string.(ps.TrainId)
 
-    # 3. Iterate through passenger demand
-    for p_row in eachrow(df_passenger)
-        train_key = (p_row.TrainCategory, p_row.TrainId)
-        
-        # Check if we even have a timetable for this train
-        if haskey(routes, train_key)
-            full_path = routes[train_key]
-            
-            # Find where the passenger stretch starts and ends in the master path
-            idx_start = findfirst(==(p_row.FromStation), full_path)
-            idx_end   = findfirst(==(p_row.ToStation), full_path)
-            
-            if isnothing(idx_start) || isnothing(idx_end)
-                continue # Station name mismatch
+    results = []
+
+    # Group by Train
+    gdf_tt = groupby(tt, [:TrainCategory, :TrainId])
+
+    for train_tt in gdf_tt
+        t_cat = string(train_tt.TrainCategory[1])
+        t_id  = string(train_tt.TrainId[1])
+
+        # Filter passenger data for this train
+        train_ps = ps[(ps.TrainCategory .== t_cat) .& (ps.TrainId .== t_id), :]
+        if isempty(train_ps) continue end
+
+        # Map for station info: Name -> (Index, Type)
+        st_info = Dict(row.Station => (i, row.Type) for (i, row) in enumerate(eachrow(train_tt)))
+
+        # --- STEP A: Consolidate Section Loads into Stop-to-Stop Segments ---
+        # transform A-B(30), B-D(30) [where B is pass] into A-D(30) and give a warning if demand changes at B
+        cleaned_segments = []
+        i = 1
+        while i <= nrow(train_ps)
+            from_st = string(train_ps[i, :FromStation])
+            to_st   = string(train_ps[i, :ToStation])
+            demand  = train_ps[i, :PassengerNum]
+
+            # Chain rows as long as the 'to_st' is a "stop" station
+            while i < nrow(train_ps) && get(st_info, to_st, (0, "stop"))[2] == "pass"
+                i += 1
+                next_demand = train_ps[i, :PassengerNum]
+                
+                if next_demand != demand
+                    @warn "Demand changed from $demand to $next_demand at pass station '$to_st' (Train $t_id)."
+                end
+                
+                to_st = string(train_ps[i, :ToStation])
             end
             
-            # Apply demand to all timetable segments that fall within this range
-            # A segment in df_timetable matches if its FromStation index is >= idx_start
-            # and its ToStation index is <= idx_end
+            # Store the cleaned segment with its timetable indices
+            idx_f = get(st_info, from_st, (0, ""))[1]
+            idx_t = get(st_info, to_st, (0, ""))[1]
             
-            mask = (df_timetable.TrainCategory .== p_row.TrainCategory) .& 
-                   (df_timetable.TrainID .== p_row.TrainId) .&
-                   [let idx_from = findfirst(==(row.FromStation), full_path)
-                        idx_to = findfirst(==(row.ToStation), full_path)
-                        !isnothing(idx_from) && !isnothing(idx_to) && idx_from >= idx_start && idx_to <= idx_end
-                    end
-                    for row in eachrow(df_timetable)]
+            if idx_f != 0 && idx_t != 0
+                push!(cleaned_segments, (f_idx=idx_f, t_idx=idx_t, demand=demand))
+            end
+            i += 1
+        end
+
+        # --- STEP B: Map to Timetable Stop-to-Stop Legs ---
+        # If tt has stops A, B, C, D and cleaned_ps has A-D(30) create rows for A-B(30), B-C(30), C-D(30)
+        stop_indices = findall(x -> x == "stop", train_tt.Type)
+        
+        for k in 1:(length(stop_indices) - 1)
+            idx_start = stop_indices[k]
+            idx_end   = stop_indices[k+1]
             
-            df_timetable[mask, :PassengerNum] .= p_row.PassengerNum
+            # Find which cleaned segment covers this specific stop-to-stop leg
+            leg_demand = 0
+            for seg in cleaned_segments
+                if seg.f_idx <= idx_start && seg.t_idx >= idx_end
+                    leg_demand = seg.demand
+                    break 
+                end
+            end
+
+            push!(results, (
+                TrainCategory        = t_cat,
+                TrainId              = t_id,
+                FromStation          = train_tt.Station[idx_start],
+                DepartureFromStation = train_tt.Departure[idx_start],
+                ToStation            = train_tt.Station[idx_end],
+                ArrivalToStation     = train_tt.Arrival[idx_end],
+                Demand               = leg_demand
+            ))
         end
     end
-    
+
+    df_merged = DataFrame(results)
+
     if save_to_csv
-        CSV.write(filename, df_timetable)
+        CSV.write(filename, df_merged)
         println("Merged data saved to $filename")
     end
-    
-    return df_timetable
+
+    return df_merged
 end

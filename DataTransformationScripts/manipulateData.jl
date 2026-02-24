@@ -7,10 +7,10 @@ parent_dir = dirname(dirname(@__FILE__))
 file_path_passenger = normpath(joinpath(parent_dir, "Data", "Passagertal_02062026.xml"))
 file_path_timetable = normpath(joinpath(parent_dir, "Data", "DLK_Timetable.xml"))
 
-df_passenger = parse_passenger_xml(file_path_passenger)
-df_timetable = parse_timetable_xml(file_path_timetable)
+df_passenger = parse_passenger_xml(file_path_passenger, save_to_csv = true, filename = "passenger_data.csv")
+df_timetable = parse_timetable_xml(file_path_timetable, save_to_csv = true, filename = "timetable_data.csv")
 
-routes = build_route_map(df_timetable)
+#routes = build_route_map(df_timetable)
 
 df_new = merge_timetable_with_demand(df_timetable, df_passenger, save_to_csv = true, filename = "merged_timetable_passenger.csv")
 
