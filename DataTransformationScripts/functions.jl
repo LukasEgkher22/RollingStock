@@ -184,6 +184,62 @@ function build_route_map(df_timetable::DataFrame; save_to_csv::Bool = false, fil
 
     return route_map
 end
+
+
+
+"""
+Parses the infrastructure XML, cleans station names (removes suffix after '/'), 
+and stores km distance and electrification status.
+"""
+function parse_infrastructure_xml(file_path::AbstractString; save_to_csv::Bool = false, filename::String = "infrastructure_data.csv")
+    # Load the XML file
+    xml_doc = readxml(file_path)
+    root_node = root(xml_doc)
+    
+    route_dict = Dict{Tuple{String, String}, NamedTuple{(:km, :electrified), Tuple{Float64, Bool}}}()
+    
+    # Iterate through all <linesegment> elements
+    for segment in findall("//linesegment", root_node)
+        # Extract Distance
+        km_val = parse(Float64, segment["kmvalue"])
+        
+        # Extract Electrification (convert "true"/"false" string to Bool)
+        is_electrified = haskey(segment, "electrified") ? lowercase(segment["electrified"]) == "true" : false
+        
+        # Extract and Clean station IDs
+        stations = findall("./stationref", segment)
+        if length(stations) >= 2
+            # Use split to take only the part before the "/"
+            id1 = first(split(stations[1]["stationid"], "/"))
+            id2 = first(split(stations[2]["stationid"], "/"))
+            
+            # Sort IDs alphabetically so (A, B) is the same as (B, A)
+            route_key = id1 < id2 ? (id1, id2) : (id2, id1)
+            
+            # Store both values in the dictionary only if the key doesn't exist
+            if !haskey(route_dict, route_key)
+                route_dict[route_key] = (km = km_val, electrified = is_electrified)
+            end
+        end
+    end
+    
+    # Handle CSV Export
+    if save_to_csv
+        export_df = DataFrame(
+            Station_A = [k[1] for k in keys(route_dict)],
+            Station_B = [k[2] for k in keys(route_dict)],
+            Distance_KM = [v.km for v in values(route_dict)],
+            Electrified = [v.electrified for v in values(route_dict)]
+        )
+        sort!(export_df, :Station_A)
+        CSV.write(filename, export_df)
+        println("Data saved to $filename")
+    end
+    
+    return route_dict
+end
+
+
 """
 Merge timetable data with passenger demand information by mapping passenger segments to individual stop-to-stop legs.
 
@@ -206,7 +262,7 @@ This function performs a three-step process:
 - Segments with stations not found in the timetable are filtered out.
 """
 
-function merge_timetable_with_demand(df_timetable::DataFrame, df_passenger::DataFrame; save_to_csv::Bool = false, filename::String = "merged_data.csv")
+function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrastructure::Dict; save_to_csv::Bool = false, filename::String = "merged_data.csv")
     # Clean types
     tt = copy(df_timetable)
     ps = copy(df_passenger)
@@ -245,6 +301,7 @@ function merge_timetable_with_demand(df_timetable::DataFrame, df_passenger::Data
                 
                 if next_demand != demand
                     @warn "Demand changed from $demand to $next_demand at pass station '$to_st' (Train $t_id)."
+                    demand = max(demand, next_demand)  # Optionally take the max demand to be conservative
                 end
                 
                 to_st = string(train_ps[i, :ToStation])
@@ -277,6 +334,18 @@ function merge_timetable_with_demand(df_timetable::DataFrame, df_passenger::Data
                 end
             end
 
+            # Get infrastructure data for this leg
+            st_a = train_tt.Station[idx_start]
+            st_b = train_tt.Station[idx_end]
+            route_key = st_a < st_b ? (st_a, st_b) : (st_b, st_a)
+            
+            distance_km = 0.0
+            is_electrified = false
+            if haskey(df_infrastructure, route_key)
+            distance_km = df_infrastructure[route_key].km
+            is_electrified = df_infrastructure[route_key].electrified
+            end
+
             push!(results, (
                 TrainCategory        = t_cat,
                 TrainId              = t_id,
@@ -284,7 +353,9 @@ function merge_timetable_with_demand(df_timetable::DataFrame, df_passenger::Data
                 DepartureFromStation = train_tt.Departure[idx_start],
                 ToStation            = train_tt.Station[idx_end],
                 ArrivalToStation     = train_tt.Arrival[idx_end],
-                Demand               = leg_demand
+                Demand               = leg_demand,
+                Distance_KM          = distance_km,
+                Electrified          = is_electrified
             ))
         end
     end
@@ -298,3 +369,4 @@ function merge_timetable_with_demand(df_timetable::DataFrame, df_passenger::Data
 
     return df_merged
 end
+
