@@ -45,7 +45,7 @@ print("Number of trips: ", n_trips, "\n")
 # -----------------------------------------------------------
 # CREATE MODEL
 # -----------------------------------------------------------
-model = Model(HiGHS.Optimizer)
+model = Model(Gurobi.Optimizer)
 
 # --- 1. Variables ---
 
@@ -61,6 +61,9 @@ model = Model(HiGHS.Optimizer)
 # s_end[m, n, s] = 1 if unit (m,n) ends the day at station s
 @variable(model, s_end[m=1:M, n=1:N[m], s=stations], Bin)
 
+# use type of train m for trip j
+@variable(model, use_group_12[1:n_trips], Bin) # 1 if trip uses Type 1 or 2
+@variable(model, use_type[3:7, 1:n_trips], Bin) # 1 if trip uses Type m (3,4,5,6,7)
 
 # Objective: Minimize total cost (km_costs * distance + unit_costs)
 @objective(model, Min, sum(x[m, n, j] * Unit_km_costs[m] * timetable_data.Distance_KM[j] for m in 1:M, n in 1:N[m], j in 1:n_trips)
@@ -133,7 +136,8 @@ for j in 1:n_trips
                            for m in 1:M, n in 1:N[m]) >= timetable_data.Demand[j])
 end
 
-# E. Symmetry Breaking (Crucial)
+# E. Symmetry Breaking
+# for each type, unit n can only perform trips if unit n-1 is also performing trips (enforces order of usage)
 for m in 1:M, n in 1:N[m]-1
     @constraint(model, sum(x[m, n, j] for j in 1:n_trips) >= 
                        sum(x[m, n+1, j] for j in 1:n_trips))
@@ -153,7 +157,18 @@ for m in electrified_m, j in non_electrified_tracks
     end
 end
 
-# H. Combination of units
+# I. Position-based limits (e.g., max 5 units of type 1 and 2 combined, max 1 unit of type 3, etc.)
+for j in 1:n_trips
+    # This prevents Type 1/2 and the other types from being used together.
+    @constraint(model, use_group_12[j] + sum(use_type[m, j] for m in 3:7) <= 1)
+
+    @constraint(model, sum(x[m,n,j] for m in 1:2, n in 1:N[m]) <= 5 * use_group_12[j]) # Max 5 units of type 1 and 2 combined
+    for m in [3,4,6]
+        @constraint(model, sum(x[m,n,j] for n in 1:N[m]) <= 1 * use_type[m, j]) # Max 1 unit of type 3, 4 and 6
+    end
+    @constraint(model, sum(x[5,n,j] for n in 1:N[5]) <= 2 * use_type[5, j]) # Max 2 units of type 5
+    @constraint(model, sum(x[7,n,j] for n in 1:N[7]) <= 4 * use_type[7, j]) # Max 4 unit of type 7
+end
 
 # Solve the model
 optimize!(model)
