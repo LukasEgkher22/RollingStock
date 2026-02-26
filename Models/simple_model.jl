@@ -145,9 +145,10 @@ for m in 1:M, n in 1:N[m]
 end
 
 # G. Electrified routes can only be served by electric units
-non_electrified_m = findall(==(0), Unit_electrified)
-for m in non_electrified_m
-    for n in 1:N[m], j in 1:n_trips
+electrified_m = findall(==(1), Unit_electrified)
+non_electrified_tracks = findall(==(false), timetable_data.Electrified)
+for m in electrified_m, j in non_electrified_tracks
+    for n in 1:N[m]
         fix(x[m, n, j], 0; force=true)
     end
 end
