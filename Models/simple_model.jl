@@ -12,9 +12,11 @@ project_root = dirname(@__DIR__)
 timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "merged_data.csv"), DataFrame)
 
 # Filter for trips between specific stations
-allowed_stations = ["HGL", "KK", "KH"]
-timetable_data = filter(row -> row.FromStation in allowed_stations && row.ToStation in allowed_stations, timetable_data)
+trainIds = [2981, 2974, 2202, 4219]#, 2200, 2768]
+#trainIds = [2202, 4219]
+timetable_data = filter(row -> row.TrainId in trainIds, timetable_data)
 timetable_data.TripId = 1:nrow(timetable_data)
+print(trainIds, " trips: ", nrow(timetable_data), "\n")
 
 # Read specific sheets from Excel file
 excel_file = XLSX.readxlsx(joinpath(project_root, "Data", "Base Day TUE.xlsx"))
@@ -23,14 +25,15 @@ night_capacity = DataFrame(XLSX.gettable(excel_file["Night capacity"]))
 
 # Access columns from rolling_stock_data
 Unit_name = rolling_stock_data.Name
-seats = rolling_stock_data.Seats
-km_costs = rolling_stock_data[!, "Kilometer costs"]
-unit_costs = rolling_stock_data[!, "Unit cost"]
-availability = rolling_stock_data.Availability
+Unit_seats = rolling_stock_data.Seats
+Unit_km_costs = rolling_stock_data[!, "Kilometer costs"]
+Unit_costs = rolling_stock_data[!, "Unit cost"]
+Unit_availability = rolling_stock_data.Availability
+Unit_electrified = rolling_stock_data.Electrified
 
 # define number of types and units
 M = nrow(rolling_stock_data)
-units_by_type = availability
+N = Unit_availability
 
 # Get unique stations from timetable
 stations = unique(timetable_data.FromStation)
@@ -47,23 +50,26 @@ model = Model(HiGHS.Optimizer)
 # --- 1. Variables ---
 
 # x[m, n, j] = 1 if unit n of type m performs trip j
-@variable(model, x[m=1:M, n=1:units_by_type[m], j=1:n_trips], Bin)
+@variable(model, x[m=1:M, n=1:N[m], j=1:n_trips], Bin)
+
+# u[m, n] = 1 if unit n of type m is used at all (for fixed costs)
+@variable(model, u[m=1:M, n=1:N[m]], Bin)
 
 # s_start[m, n, s] = 1 if unit (m,n) starts the day at station s
-@variable(model, s_start[m=1:M, n=1:units_by_type[m], s=stations], Bin)
+@variable(model, s_start[m=1:M, n=1:N[m], s=stations], Bin)
 
 # s_end[m, n, s] = 1 if unit (m,n) ends the day at station s
-@variable(model, s_end[m=1:M, n=1:units_by_type[m], s=stations], Bin)
+@variable(model, s_end[m=1:M, n=1:N[m], s=stations], Bin)
 
 
 # Objective: Minimize total cost (km_costs * distance + unit_costs)
-@objective(model, Min, sum(x[m, n, j] * (km_costs[m] * timetable_data.Distance_KM[j] + unit_costs[m]) 
-                            for m in 1:M, n in 1:units_by_type[m], j in 1:n_trips))
+@objective(model, Min, sum(x[m, n, j] * Unit_km_costs[m] * timetable_data.Distance_KM[j] for m in 1:M, n in 1:N[m], j in 1:n_trips)
+                        + sum(Unit_costs[m] * u[m, n] for m in 1:M, n in 1:N[m]))
 
 # --- 2. Constraints ---
 
 # A. Unit Flow & Continuity
-for m in 1:M, n in 1:units_by_type[m]
+for m in 1:M, n in 1:N[m]
     # Each unit starts and ends exactly once
     @constraint(model, sum(s_start[m, n, s] for s in stations) == 1)
     @constraint(model, sum(s_end[m, n, s] for s in stations) == 1)
@@ -72,7 +78,7 @@ for m in 1:M, n in 1:units_by_type[m]
         trips_out = findall(timetable_data.FromStation .== s)
         trips_in  = findall(timetable_data.ToStation .== s)
 
-        # Standard Flow Conservation: Start + In == Out + End
+        # Standard Flow Conservation: Start + In (available) == Out + End (used up)
         @constraint(model, 
             s_start[m, n, s] + sum(x[m, n, j] for j in trips_in) == 
             s_end[m, n, s] + sum(x[m, n, j] for j in trips_out)
@@ -94,7 +100,7 @@ for s in stations
     # Sort events: Arrivals at the same time as departures are processed FIRST
     sort!(events, by = x -> (x.time, x.type == :dep))
 
-    for m in 1:M, n in 1:units_by_type[m]
+    for m in 1:M, n in 1:N[m]
         for i in 1:length(events)
             # We look at the "state" of unit (m,n) at station s after event i
             current_events = events[1:i]
@@ -116,22 +122,37 @@ end
 # "The number of units of type m starting at s must equal the number ending at s"
 for m in 1:M, s in stations
     @constraint(model, 
-        sum(s_start[m, n, s] for n in 1:units_by_type[m]) == 
-        sum(s_end[m, n, s] for n in 1:units_by_type[m])
+        sum(s_start[m, n, s] for n in 1:N[m]) == 
+        sum(s_end[m, n, s] for n in 1:N[m])
     )
 end
 
 # D. Demand Coverage (Allows coupling/multiple units)
 for j in 1:n_trips
     @constraint(model, sum(x[m, n, j] * rolling_stock_data.Seats[m] 
-                           for m in 1:M, n in 1:units_by_type[m]) >= timetable_data.Demand[j])
+                           for m in 1:M, n in 1:N[m]) >= timetable_data.Demand[j])
 end
 
 # E. Symmetry Breaking (Crucial)
-for m in 1:M, n in 1:units_by_type[m]-1
+for m in 1:M, n in 1:N[m]-1
     @constraint(model, sum(x[m, n, j] for j in 1:n_trips) >= 
                        sum(x[m, n+1, j] for j in 1:n_trips))
 end
+
+# F. Link x and u (if unit n of type m is used, then u[m,n] = 1)
+for m in 1:M, n in 1:N[m]
+    @constraint(model, sum(x[m, n, j] for j in 1:n_trips) <= Unit_availability[m] * u[m, n]) # Big-M
+end
+
+# G. Electrified routes can only be served by electric units
+non_electrified_m = findall(==(0), Unit_electrified)
+for m in non_electrified_m
+    for n in 1:N[m], j in 1:n_trips
+        fix(x[m, n, j], 0; force=true)
+    end
+end
+
+# H. Combination of units
 
 # Solve the model
 optimize!(model)
@@ -148,7 +169,7 @@ if termination_status(model) == OPTIMAL
     println("\n--- UNIT ROUTING DETAILS ---")
     for m in 1:M
         println("\nUnit Type: ", Unit_name[m], " (Seats: ", seats[m], ")")
-        for n in 1:units_by_type[m]
+        for n in 1:N[m]
             assigned_trips = findall(j -> value(x[m, n, j]) > 0.5, 1:n_trips)
             
             if !isempty(assigned_trips)
@@ -161,7 +182,7 @@ if termination_status(model) == OPTIMAL
                 end
                 
                 # Trips
-                for j in assigned_trips
+                for j in sort(assigned_trips, by = i -> timetable_data.DepartureFromStation[i])
                     trip = timetable_data[j, :]
                     println("    Trip $j: ", trip.FromStation, " -> ", trip.ToStation, 
                             " (Depart: ", trip.DepartureFromStation, ", Arrive: ", trip.ArrivalToStation, 
