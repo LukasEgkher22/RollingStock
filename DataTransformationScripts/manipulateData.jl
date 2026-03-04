@@ -8,15 +8,16 @@ file_path_passenger = normpath(joinpath(parent_dir, "Data", "Passagertal_0206202
 file_path_timetable = normpath(joinpath(parent_dir, "Data", "DLK_Timetable.xml"))
 file_path_infrastructure = normpath(joinpath(parent_dir, "Data", "dlkinfra_IF-26_20260121081306.xml"))
 
-df_passenger = parse_passenger_xml(file_path_passenger)
+#df_passenger = parse_passenger_xml(file_path_passenger)
 df_timetable = parse_timetable_xml(file_path_timetable)
-df_infra = parse_infrastructure_xml(file_path_infrastructure)
+#df_infra = parse_infrastructure_xml(file_path_infrastructure)
+#df_abbreviations = extract_station_names(joinpath(project_root, "Data", "Station Abbreviation.xlsx"))
 
 #routes = build_route_map(df_timetable)
 
-df_new = merge_data(df_timetable, df_passenger, df_infra, save_to_csv = true, filename = "merged_data.csv")
+#df_new = merge_data(df_timetable, df_passenger, df_infra, save_to_csv = true, filename = "merged_data.csv")
 
-println(first(df_new, 5))
+#println(first(df_new, 5))
 #println(first(routes, 5))
 
 # Save the routes DataFrame to a CSV file

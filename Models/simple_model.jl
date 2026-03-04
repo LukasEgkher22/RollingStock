@@ -2,21 +2,52 @@ using CSV
 using DataFrames
 using JuMP
 using Gurobi
-using HiGHS
 using XLSX
 
-
 project_root = dirname(@__DIR__)
+
+include(joinpath(project_root, "DataTransformationScripts", "functions.jl"))
+
+# parameters
+use_smaller_dataset = true
 
 # Read merged data from CSV
 timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "merged_data.csv"), DataFrame)
 
-# Filter for trips between specific stations
-trainIds = [2981, 2974, 2202, 4219]#, 2200, 2768]
-#trainIds = [2202, 4219]
-timetable_data = filter(row -> row.TrainId in trainIds, timetable_data)
-timetable_data.TripId = 1:nrow(timetable_data)
-print(trainIds, " trips: ", nrow(timetable_data), "\n")
+if use_smaller_dataset
+    # Read train routes and filter for routes left of Odense (OD)
+    train_routes = CSV.read(joinpath(project_root, "DataManipulated", "train_routes.csv"), DataFrame)
+    train_routes.Route = [split(str, r",\s*") for str in train_routes.Route]
+
+    neighbors = Set{String}()
+    
+    to_explore = ["AR"]
+    bad_stations = Set(["GP", "HP", "SNO", "OD", "TL", "KD", "LK", "ADF", "HMB", "PA", "RQ", "ASW", "AB", "HN", "HA", "LG", "BR"])
+
+    while !isempty(to_explore)
+        current = pop!(to_explore)
+        if current in neighbors
+            continue
+        end
+        
+        new_neighbors = get_neighbor_stations(train_routes, current, bad_stations ∪ neighbors)
+        push!(neighbors, current)
+        union!(to_explore, new_neighbors)
+    end
+
+    display(sort(collect(neighbors)))
+
+    unique_stations = Set{String}()
+    for route in train_routes.Route
+        union!(unique_stations, route)
+    end
+    println("Number of unique stations: ", length(unique_stations))
+
+    # Filter timetable data to only include trips that start or end at these stations
+    timetable_data = filter(row -> (row.FromStation in neighbors) || (row.ToStation in neighbors), timetable_data)
+    println("Filtered timetable has ", nrow(timetable_data), " trips.")
+end
+
 
 # Read specific sheets from Excel file
 excel_file = XLSX.readxlsx(joinpath(project_root, "Data", "Base Day TUE.xlsx"))
@@ -39,8 +70,7 @@ N = Unit_availability
 stations = unique(timetable_data.FromStation)
 
 n_trips = nrow(timetable_data)
-print("Number of trips: ", n_trips, "\n")
-
+timetable_data.Id = 1:n_trips
 
 # -----------------------------------------------------------
 # CREATE MODEL
@@ -97,8 +127,8 @@ for s in stations
     arrs = filter(r -> r.ToStation == s, timetable_data)
     
     events = []
-    for r in eachrow(deps) push!(events, (time=r.DepartureFromStation, type=:dep, id=r.TripId)) end
-    for r in eachrow(arrs) push!(events, (time=r.ArrivalToStation, type=:arr, id=r.TripId)) end
+    for r in eachrow(deps) push!(events, (time=r.DepartureFromStation, type=:dep, id=r.Id)) end
+    for r in eachrow(arrs) push!(events, (time=r.ArrivalToStation, type=:arr, id=r.Id)) end
     
     # Sort events: Arrivals at the same time as departures are processed FIRST
     sort!(events, by = x -> (x.time, x.type == :dep))

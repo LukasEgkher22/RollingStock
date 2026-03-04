@@ -148,35 +148,32 @@ Arguments:
 - `filename`: The path/name for the CSV file if saving.
 """
 function build_route_map(df_timetable::DataFrame; save_to_csv::Bool = false, filename::String = "train_routes.csv")
+    # Store actual vectors in the dictionary for programmatic use
     route_map = Dict{Tuple{String, String}, Vector{String}}()
     
-    # Group by train to get the segments in order
     for (key, subdf) in pairs(groupby(df_timetable, [:TrainCategory, :TrainId]))
         if isempty(subdf) continue end
         
-        # Filter to only include stops and collect stations in order
+        # Filter for stops and extract the Station column
         stops = filter(row -> row.Type == "stop", subdf)
         if isempty(stops) continue end
         
-        path = stops.Station
-        route_map[(String(key.TrainCategory), String(key.TrainId))] = path
+        # Convert keys and values to strings safely
+        cat = string(key.TrainCategory)
+        id = string(key.TrainId)
+        path = Vector{String}(stops.Station)
+        
+        route_map[(cat, id)] = path
     end
 
     if save_to_csv
-        # Create a DataFrame for saving with specific formatting
-        csv_df = DataFrame()
-        
-        csv_df[!, "TrainCategory"] = [
-            k[1] for k in keys(route_map)
-        ]
-        csv_df[!, "TrainId"] = [
-            k[2] for k in keys(route_map)
-        ]
-        
-        # Format the Route column: ["ST1", "ST2"] -> [ST1 - ST2]
-        csv_df[!, "Route"] = [
-            "[" * join(v, " - ") * "]" for v in values(route_map)
-        ]
+        # Create a formatted DataFrame for CSV export
+        csv_df = DataFrame(
+            TrainCategory = [k[1] for k in keys(route_map)],
+            TrainId = [k[2] for k in keys(route_map)],
+            # Join the vector into a simple string for the CSV column
+            Route = [join(v, ", ") for v in values(route_map)]
+        )
         
         CSV.write(filename, csv_df)
         println("Route map saved to $filename")
@@ -368,5 +365,78 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
     end
 
     return df_merged
+end
+
+
+"""
+Find adjacent stations to a given station across all routes.
+
+Returns a set of neighboring stations that directly precede or follow the start_station
+in any route, excluding stations marked as bad.
+
+# Arguments
+- `routes_df`: DataFrame containing route information
+- `start_station`: Station identifier to find neighbors for
+- `bad_stations`: Set of station identifiers to exclude from results
+
+# Returns
+- `Set{String}`: Set of valid neighboring station identifiers
+"""
+function get_neighbor_stations(routes_df, start_station, bad_stations = Set{String}())
+    neighbors = Set{String}()
+    
+    # Find all stations adjacent to start_station
+    for route in routes_df.Route
+        idx = findfirst(isequal(start_station), route)
+        if idx !== nothing
+            # Check left neighbor
+            if idx > 1
+                left_neighbor = route[idx - 1]
+                if !(left_neighbor in bad_stations)
+                    push!(neighbors, left_neighbor)
+                end
+            end
+            # Check right neighbor
+            if idx < length(route)
+                right_neighbor = route[idx + 1]
+                if !(right_neighbor in bad_stations)
+                    push!(neighbors, right_neighbor)
+                end
+            end
+        end
+    end
+    
+    return neighbors
+end
+
+
+"""
+Extract station names from an Excel file and optionally save to CSV.
+
+# Arguments
+- `path::String`: Path to the Excel file.
+- `save_to_csv::Bool`: If true, save the resulting DataFrame to CSV file. Default is false.
+- `filename::String`: Name of the output CSV file. Default is "station_names.csv".
+
+# Returns
+- `DataFrame`: Table with columns "Abbreviations" and "Long Name".
+"""
+function extract_station_names(path::String; save_to_csv::Bool = false, filename::String = "station_names.csv")
+    # Open the excel file
+    xf = XLSX.readxlsx(path)
+    sheet = xf[1] 
+    data = XLSX.gettable(sheet) |> DataFrame
+    
+    # Select the 2nd and 3rd columns by index and clean the station names
+    df = data[:, [2, 3]]
+    df[:, 1] = [split(name, "/")[1] for name in df[:, 1]] # Remove anything after "/" in the first column
+    rename!(df, [1 => "Abbreviations", 2 => "Long Name"])
+    
+    if save_to_csv
+        CSV.write(filename, df)
+        println("Saved to $filename")
+    end
+    
+    return df
 end
 
