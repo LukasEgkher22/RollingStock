@@ -21,8 +21,8 @@ if use_smaller_dataset
 
     neighbors = Set{String}()
     
-    to_explore = ["AR"]
-    bad_stations = Set(["GP", "HP", "SNO", "OD", "TL", "KD", "LK", "ADF", "HMB", "PA", "RQ", "ASW", "AB", "HN", "HA", "LG", "BR"])
+    to_explore = ["AR/86"]
+    bad_stations = Set(["GP/86", "HP/86", "SNO/86", "OD/86", "TL/86", "KD/86", "LK/86", "ADF/80", "HMB/80", "PA/86", "RQ/86", "ASW/80", "AB/86", "HN/86", "HA/86", "LG/86", "BR/86"])
 
     while !isempty(to_explore)
         current = pop!(to_explore)
@@ -35,18 +35,25 @@ if use_smaller_dataset
         union!(to_explore, new_neighbors)
     end
 
-    display(sort(collect(neighbors)))
+    # display(sort(collect(neighbors)))
 
     unique_stations = Set{String}()
     for route in train_routes.Route
         union!(unique_stations, route)
     end
-    println("Number of unique stations: ", length(unique_stations))
+    # println("Number of unique stations: ", length(unique_stations))
 
     # Filter timetable data to only include trips that start or end at these stations
     timetable_data = filter(row -> (row.FromStation in neighbors) || (row.ToStation in neighbors), timetable_data)
     println("Filtered timetable has ", nrow(timetable_data), " trips.")
 end
+
+# Filter timetable data to keep only trips with predefined set of TrainIds
+#predefined_train_ids = Set([738, 731])
+#timetable_data = filter(row -> row.TrainId in predefined_train_ids, timetable_data)
+
+timetable_data = timetable_data[1:2, :]
+print("\nFiltered timetable has ", nrow(timetable_data), " trips.\n")
 
 
 # Read specific sheets from Excel file
@@ -67,10 +74,11 @@ M = nrow(rolling_stock_data)
 N = Unit_availability
 
 # Get unique stations from timetable
-stations = unique(timetable_data.FromStation)
+stations = unique(timetable_data.FromStation ∪ timetable_data.ToStation)
 
 n_trips = nrow(timetable_data)
 timetable_data.Id = 1:n_trips
+print(timetable_data)
 
 # -----------------------------------------------------------
 # CREATE MODEL
@@ -81,9 +89,6 @@ model = Model(Gurobi.Optimizer)
 
 # x[m, n, j] = 1 if unit n of type m performs trip j
 @variable(model, x[m=1:M, n=1:N[m], j=1:n_trips], Bin)
-
-# u[m, n] = 1 if unit n of type m is used at all (for fixed costs)
-@variable(model, u[m=1:M, n=1:N[m]], Bin)
 
 # s_start[m, n, s] = 1 if unit (m,n) starts the day at station s
 @variable(model, s_start[m=1:M, n=1:N[m], s=stations], Bin)
@@ -97,26 +102,26 @@ model = Model(Gurobi.Optimizer)
 
 # Objective: Minimize total cost (km_costs * distance + unit_costs)
 @objective(model, Min, sum(x[m, n, j] * Unit_km_costs[m] * timetable_data.Distance_KM[j] for m in 1:M, n in 1:N[m], j in 1:n_trips)
-                        + sum(Unit_costs[m] * u[m, n] for m in 1:M, n in 1:N[m]))
+                        + sum(Unit_costs[m] * s_start[m, n, s] for m in 1:M, n in 1:N[m], s in stations))
 
 # --- 2. Constraints ---
 
-# A. Unit Flow & Continuity
+# A. A unit either starts and ends or is not used at all
 for m in 1:M, n in 1:N[m]
-    # Each unit starts and ends exactly once
-    @constraint(model, sum(s_start[m, n, s] for s in stations) == 1)
-    @constraint(model, sum(s_end[m, n, s] for s in stations) == 1)
+    @constraint(model, sum(s_start[m, n, s] for s in stations) <= 1)
+    @constraint(model, sum(s_end[m, n, s] for s in stations) <= 1)
+    @constraint(model, sum(s_start[m, n, s] for s in stations) == sum(s_end[m, n, s] for s in stations)) # If it starts somewhere, it must end somewhere
+end
 
-    for s in stations
-        trips_out = findall(timetable_data.FromStation .== s)
-        trips_in  = findall(timetable_data.ToStation .== s)
-
-        # Standard Flow Conservation: Start + In (available) == Out + End (used up)
-        @constraint(model, 
-            s_start[m, n, s] + sum(x[m, n, j] for j in trips_in) == 
-            s_end[m, n, s] + sum(x[m, n, j] for j in trips_out)
-        )
-    end
+# A.2 Flow conservation at stations (all that arrives or is already there, must also depart, or end there)
+for m in 1:M, s in stations
+    # For each station, the number of units arriving must equal the number departing (flow conservation)
+    @constraint(model, 
+        sum(s_start[m, n, s] for n in 1:N[m]) + 
+        sum(x[m, n, j] for n in 1:N[m], j in 1:n_trips if timetable_data.ToStation[j] == s) ==
+        sum(s_end[m, n, s] for n in 1:N[m]) + 
+        sum(x[m, n, j] for n in 1:N[m], j in 1:n_trips if timetable_data.FromStation[j] == s)
+    )
 end
 
 # B. Chronology (Preventing "Time Travel")
@@ -153,12 +158,12 @@ end
 
 # C. Global Station Balance (Type-based overnight requirement)
 # "The number of units of type m starting at s must equal the number ending at s"
-for m in 1:M, s in stations
-    @constraint(model, 
-        sum(s_start[m, n, s] for n in 1:N[m]) == 
-        sum(s_end[m, n, s] for n in 1:N[m])
-    )
-end
+# for m in 1:M, s in stations
+#     @constraint(model, 
+#         sum(s_start[m, n, s] for n in 1:N[m]) == 
+#         sum(s_end[m, n, s] for n in 1:N[m])
+#     )
+# end
 
 # D. Demand Coverage (Allows coupling/multiple units)
 for j in 1:n_trips
@@ -173,9 +178,9 @@ for m in 1:M, n in 1:N[m]-1
                        sum(x[m, n+1, j] for j in 1:n_trips))
 end
 
-# F. Link x and u (if unit n of type m is used, then u[m,n] = 1)
+# F. Link x and start (if unit does not start, it cannot perform trips
 for m in 1:M, n in 1:N[m]
-    @constraint(model, sum(x[m, n, j] for j in 1:n_trips) <= Unit_availability[m] * u[m, n]) # Big-M
+    @constraint(model, sum(x[m, n, j] for j in 1:n_trips) <= Unit_availability[m] * sum(s_start[m, n, s] for s in stations)) # Big-M
 end
 
 # G. Electrified routes can only be served by electric units
@@ -206,17 +211,26 @@ optimize!(model)
 # Print results
 println("\n--- OPTIMIZATION RESULTS ---")
 println("Status: ", termination_status(model))
-println("Objective Value: ", objective_value(model))
 
 if termination_status(model) == OPTIMAL
-    println("\nOptimal solution found!")
     println("Total Cost: \$", round(objective_value(model), digits=2))
     
     println("\n--- UNIT ROUTING DETAILS ---")
     for m in 1:M
-        println("\nUnit Type: ", Unit_name[m], " (Seats: ", seats[m], ")")
+        println("\nUnit Type: ", Unit_name[m], " (Seats: ", Unit_seats[m], ")")
         for n in 1:N[m]
             assigned_trips = findall(j -> value(x[m, n, j]) > 0.5, 1:n_trips)
+            # for j in assigned_trips
+            #     print("  Value of x[", m, ", ", n, ", ", j, "]: ", [value(x[m, n, j])], "\n")
+                
+            # end
+            # for s in stations
+            #     if value(s_start[m, n, s]) > 0.5 || value(s_end[m, n, s]) > 0.5
+            #         print("  Value of s_start[", m, ", ", n, ", ", s, "]: ", [value(s_start[m, n, s])], "\n")
+            #         print("  Value of s_end[", m, ", ", n, ", ", s, "]: ", [value(s_end[m, n, s])], "\n")
+            #     end 
+            # end
+            
             
             if !isempty(assigned_trips)
                 println("  Unit #$n:")
