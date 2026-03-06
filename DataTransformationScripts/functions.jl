@@ -39,10 +39,8 @@ function parse_passenger_xml(file_path::AbstractString; save_to_csv::Bool = fals
             PassengerNum  = parse(Int, node["PassengerNumber"]),
             
             # get data from sub-elements
-            FromStation   = findfirst("tns:FromStation", node, ns)["ShortName"],
-            #FromCountry   = findfirst("tns:FromStation", node, ns)["CountryCode"],
-            ToStation     = findfirst("tns:ToStation", node, ns)["ShortName"],
-            #ToCountry     = findfirst("tns:ToStation", node, ns)["CountryCode"]
+            FromStation   = findfirst("tns:FromStation", node, ns)["ShortName"] * "/" * findfirst("tns:FromStation", node, ns)["CountryCode"],
+            ToStation     = findfirst("tns:ToStation", node, ns)["ShortName"] * "/" * findfirst("tns:ToStation", node, ns)["CountryCode"],
         )
         push!(data_rows, row)
     end
@@ -109,15 +107,12 @@ function parse_timetable_xml(file_path::AbstractString, target_date::Union{Abstr
         entries = findall(".//entry[@type]", train_node)
 
         for entry_node in entries
-            # Extract posID and strip the country suffix (e.g., "HMB/80" -> "HMB")
-            st_raw = haskey(entry_node, "posID") ? entry_node["posID"] : ""
-            st = split(st_raw, "/")[1]
 
             # Create the row using haskey/get logic to prevent errors if attributes are missing
             row = (
                 TrainCategory = String(train_category),
                 TrainId       = String(train_id_val),
-                Station       = String(st),
+                Station       = haskey(entry_node, "posID") ? entry_node["posID"] : "",
                 Arrival       = haskey(entry_node, "arrival") ? entry_node["arrival"] : "",
                 Departure     = haskey(entry_node, "departure") ? entry_node["departure"] : "",
                 Type          = haskey(entry_node, "type") ? entry_node["type"] : ""
@@ -206,9 +201,8 @@ function parse_infrastructure_xml(file_path::AbstractString; save_to_csv::Bool =
         # Extract and Clean station IDs
         stations = findall("./stationref", segment)
         if length(stations) >= 2
-            # Use split to take only the part before the "/"
-            id1 = first(split(stations[1]["stationid"], "/"))
-            id2 = first(split(stations[2]["stationid"], "/"))
+            id1 = stations[1]["stationid"]
+            id2 = stations[2]["stationid"]
             
             # Sort IDs alphabetically so (A, B) is the same as (B, A)
             route_key = id1 < id2 ? (id1, id2) : (id2, id1)
@@ -429,7 +423,7 @@ function extract_station_names(path::String; save_to_csv::Bool = false, filename
     
     # Select the 2nd and 3rd columns by index and clean the station names
     df = data[:, [2, 3]]
-    df[:, 1] = [split(name, "/")[1] for name in df[:, 1]] # Remove anything after "/" in the first column
+    df[:, 1] = map(name -> occursin("/", name) ? name : name * "/86", df[:, 1]) # add danish suffix, if no suffix is given
     rename!(df, [1 => "Abbreviations", 2 => "Long Name"])
     
     if save_to_csv
