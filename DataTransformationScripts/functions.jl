@@ -1,9 +1,10 @@
 using EzXML
 using DataFrames
+using Printf
 
 
 """
-Reads the passenger XML file.
+Reads the passenger XML file
 
 Arguments
 - `file_path::AbstractString`: Path to the passenger XML file to parse.
@@ -39,10 +40,8 @@ function parse_passenger_xml(file_path::AbstractString; save_to_csv::Bool = fals
             PassengerNum  = parse(Int, node["PassengerNumber"]),
             
             # get data from sub-elements
-            FromStation   = findfirst("tns:FromStation", node, ns)["ShortName"],
-            #FromCountry   = findfirst("tns:FromStation", node, ns)["CountryCode"],
-            ToStation     = findfirst("tns:ToStation", node, ns)["ShortName"],
-            #ToCountry     = findfirst("tns:ToStation", node, ns)["CountryCode"]
+            FromStation   = findfirst("tns:FromStation", node, ns)["ShortName"] * "/" * findfirst("tns:FromStation", node, ns)["CountryCode"],
+            ToStation     = findfirst("tns:ToStation", node, ns)["ShortName"] * "/" * findfirst("tns:ToStation", node, ns)["CountryCode"],
         )
         push!(data_rows, row)
     end
@@ -109,17 +108,16 @@ function parse_timetable_xml(file_path::AbstractString, target_date::Union{Abstr
         entries = findall(".//entry[@type]", train_node)
 
         for entry_node in entries
-            # Extract posID and strip the country suffix (e.g., "HMB/80" -> "HMB")
-            st_raw = haskey(entry_node, "posID") ? entry_node["posID"] : ""
-            st = split(st_raw, "/")[1]
 
             # Create the row using haskey/get logic to prevent errors if attributes are missing
             row = (
                 TrainCategory = String(train_category),
                 TrainId       = String(train_id_val),
-                Station       = String(st),
-                Arrival       = haskey(entry_node, "arrival") ? entry_node["arrival"] : "",
-                Departure     = haskey(entry_node, "departure") ? entry_node["departure"] : "",
+                Station       = haskey(entry_node, "posID") ? entry_node["posID"] : "",
+                Arrival       = (haskey(entry_node, "arrivalDay") && haskey(entry_node, "arrival")) ?
+                                (entry_node["arrivalDay"] == "1" ? add_24h_offset(entry_node["arrival"]) : entry_node["arrival"]) : "",
+                Departure     = (haskey(entry_node, "departureDay") && haskey(entry_node, "departure")) ?
+                                (entry_node["departureDay"] == "1" ? add_24h_offset(entry_node["departure"]) : entry_node["departure"]) : "",
                 Type          = haskey(entry_node, "type") ? entry_node["type"] : ""
             )
             push!(data_rows, row)
@@ -148,35 +146,32 @@ Arguments:
 - `filename`: The path/name for the CSV file if saving.
 """
 function build_route_map(df_timetable::DataFrame; save_to_csv::Bool = false, filename::String = "train_routes.csv")
+    # Store actual vectors in the dictionary for programmatic use
     route_map = Dict{Tuple{String, String}, Vector{String}}()
     
-    # Group by train to get the segments in order
     for (key, subdf) in pairs(groupby(df_timetable, [:TrainCategory, :TrainId]))
         if isempty(subdf) continue end
         
-        # Filter to only include stops and collect stations in order
+        # Filter for stops and extract the Station column
         stops = filter(row -> row.Type == "stop", subdf)
         if isempty(stops) continue end
         
-        path = stops.Station
-        route_map[(String(key.TrainCategory), String(key.TrainId))] = path
+        # Convert keys and values to strings safely
+        cat = string(key.TrainCategory)
+        id = string(key.TrainId)
+        path = Vector{String}(stops.Station)
+        
+        route_map[(cat, id)] = path
     end
 
     if save_to_csv
-        # Create a DataFrame for saving with specific formatting
-        csv_df = DataFrame()
-        
-        csv_df[!, "TrainCategory"] = [
-            k[1] for k in keys(route_map)
-        ]
-        csv_df[!, "TrainId"] = [
-            k[2] for k in keys(route_map)
-        ]
-        
-        # Format the Route column: ["ST1", "ST2"] -> [ST1 - ST2]
-        csv_df[!, "Route"] = [
-            "[" * join(v, " - ") * "]" for v in values(route_map)
-        ]
+        # Create a formatted DataFrame for CSV export
+        csv_df = DataFrame(
+            TrainCategory = [k[1] for k in keys(route_map)],
+            TrainId = [k[2] for k in keys(route_map)],
+            # Join the vector into a simple string for the CSV column
+            Route = [join(v, ", ") for v in values(route_map)]
+        )
         
         CSV.write(filename, csv_df)
         println("Route map saved to $filename")
@@ -188,7 +183,7 @@ end
 
 
 """
-Parses the infrastructure XML, cleans station names (removes suffix after '/'), 
+Parses the infrastructure XML, 
 and stores km distance and electrification status.
 """
 function parse_infrastructure_xml(file_path::AbstractString; save_to_csv::Bool = false, filename::String = "infrastructure_data.csv")
@@ -209,9 +204,8 @@ function parse_infrastructure_xml(file_path::AbstractString; save_to_csv::Bool =
         # Extract and Clean station IDs
         stations = findall("./stationref", segment)
         if length(stations) >= 2
-            # Use split to take only the part before the "/"
-            id1 = first(split(stations[1]["stationid"], "/"))
-            id2 = first(split(stations[2]["stationid"], "/"))
+            id1 = stations[1]["stationid"]
+            id2 = stations[2]["stationid"]
             
             # Sort IDs alphabetically so (A, B) is the same as (B, A)
             route_key = id1 < id2 ? (id1, id2) : (id2, id1)
@@ -335,15 +329,35 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
             end
 
             # Get infrastructure data for this leg
-            st_a = train_tt.Station[idx_start]
-            st_b = train_tt.Station[idx_end]
-            route_key = st_a < st_b ? (st_a, st_b) : (st_b, st_a)
-            
-            distance_km = 0.0
-            is_electrified = false
-            if haskey(df_infrastructure, route_key)
-            distance_km = df_infrastructure[route_key].km
-            is_electrified = df_infrastructure[route_key].electrified
+             # 2. AGGREGATE INFRASTRUCTURE DATA
+            # We look at every single step in the timetable between idx_start and idx_end
+            total_distance = 0.0
+            is_fully_electrified = true
+            segment_found_count = 0
+            required_segments = idx_end - idx_start
+
+            for j in idx_start:(idx_end - 1)
+                st_a = train_tt.Station[j]
+                st_b = train_tt.Station[j+1]
+                
+                # Sort keys to match Dict format
+                route_key = st_a < st_b ? (st_a, st_b) : (st_b, st_a)
+                
+                if haskey(df_infrastructure, route_key)
+                    infra = df_infrastructure[route_key]
+                    total_distance += infra.km
+                    # If any single part is NOT electrified, the whole leg is not
+                    is_fully_electrified = is_fully_electrified && infra.electrified
+                    segment_found_count += 1
+                else
+                    @warn "Missing infrastructure data for segment: $st_a to $st_b"
+                    is_fully_electrified = false
+                end
+            end
+
+            # If no segments were found, ensure distance is 0 and electrified is false
+            if segment_found_count == 0
+                is_fully_electrified = false
             end
 
             push!(results, (
@@ -354,8 +368,8 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
                 ToStation            = train_tt.Station[idx_end],
                 ArrivalToStation     = train_tt.Arrival[idx_end],
                 Demand               = leg_demand,
-                Distance_KM          = distance_km,
-                Electrified          = is_electrified
+                Distance_KM          = round(total_distance, digits = 1),
+                Electrified          = is_fully_electrified
             ))
         end
     end
@@ -370,3 +384,98 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
     return df_merged
 end
 
+
+
+"""
+Extract station names from an Excel file and optionally save to CSV.
+
+# Arguments
+- `path::String`: Path to the Excel file.
+- `save_to_csv::Bool`: If true, save the resulting DataFrame to CSV file. Default is false.
+- `filename::String`: Name of the output CSV file. Default is "station_names.csv".
+
+# Returns
+- `DataFrame`: Table with columns "Abbreviations" and "Long Name".
+"""
+function extract_station_names(path::String; save_to_csv::Bool = false, filename::String = "station_names.csv")
+    # Open the excel file
+    xf = XLSX.readxlsx(path)
+    sheet = xf[1] 
+    data = XLSX.gettable(sheet) |> DataFrame
+    
+    # Select the 2nd and 3rd columns by index and clean the station names
+    df = data[:, [2, 3]]
+    df[:, 1] = map(name -> occursin("/", name) ? name : name * "/86", df[:, 1]) # add danish suffix, if no suffix is given
+    rename!(df, [1 => "Abbreviations", 2 => "Long Name"])
+    
+    if save_to_csv
+        sort!(df, :Abbreviations)
+        CSV.write(filename, df)
+        println("Saved to $filename")
+    end
+    
+    return df
+end
+
+
+
+"""
+Find adjacent stations to a given station across all routes.
+
+Returns a set of neighboring stations that directly precede or follow the start_station
+in any route, excluding stations marked as bad.
+
+# Arguments
+- `routes_df`: DataFrame containing route information
+- `start_station`: Station identifier to find neighbors for
+- `bad_stations`: Set of station identifiers to exclude from results
+
+# Returns
+- `Set{String}`: Set of valid neighboring station identifiers
+"""
+function get_neighbor_stations(routes_df, start_station, bad_stations = Set{String}())
+    neighbors = Set{String}()
+    
+    # Find all stations adjacent to start_station
+    for route in routes_df.Route
+        idx = findfirst(isequal(start_station), route)
+        if idx !== nothing
+            # Check left neighbor
+            if idx > 1
+                left_neighbor = route[idx - 1]
+                if !(left_neighbor in bad_stations)
+                    push!(neighbors, left_neighbor)
+                end
+            end
+            # Check right neighbor
+            if idx < length(route)
+                right_neighbor = route[idx + 1]
+                if !(right_neighbor in bad_stations)
+                    push!(neighbors, right_neighbor)
+                end
+            end
+        end
+    end
+    
+    return neighbors
+end
+
+
+"""
+Add 24 hours to a given time string, effectively shifting it to the next day.
+
+# Arguments
+- `time_str::String`: A time string in the format "HH:MM:SS" or "HH:MM". Empty strings are handled gracefully.
+
+# Returns
+- `String`: The adjusted time string with 24 hours added, formatted as "HH:MM:SS" with leading zeros for single-digit components.
+"""
+
+function add_24h_offset(time_str::String)
+    parts = split(time_str, ":")
+    h = parse(Int, parts[1]) + 24
+    m = parse(Int, parts[2])
+    # Use existing seconds if available, otherwise "00"
+    s = length(parts) >= 3 ? parse(Int, parts[3]) : 0
+    return @sprintf("%02d:%02d:%02d", h, m, s)
+end

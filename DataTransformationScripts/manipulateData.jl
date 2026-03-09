@@ -1,4 +1,4 @@
-using CSV
+using CSV, XLSX
 include("functions.jl")
 
 
@@ -8,15 +8,17 @@ file_path_passenger = normpath(joinpath(parent_dir, "Data", "Passagertal_0206202
 file_path_timetable = normpath(joinpath(parent_dir, "Data", "DLK_Timetable.xml"))
 file_path_infrastructure = normpath(joinpath(parent_dir, "Data", "dlkinfra_IF-26_20260121081306.xml"))
 
-df_passenger = parse_passenger_xml(file_path_passenger)
-df_timetable = parse_timetable_xml(file_path_timetable)
-df_infra = parse_infrastructure_xml(file_path_infrastructure)
+df_passenger = parse_passenger_xml(file_path_passenger, save_to_csv = true, filename = "passenger_data.csv")
+df_timetable = parse_timetable_xml(file_path_timetable, save_to_csv = true, filename = "timetable_data.csv")
+df_infra = parse_infrastructure_xml(file_path_infrastructure, save_to_csv = true, filename = "infrastructure_data.csv")
 
-#routes = build_route_map(df_timetable)
 
 df_new = merge_data(df_timetable, df_passenger, df_infra, save_to_csv = true, filename = "merged_data.csv")
 
-println(first(df_new, 5))
+# stations_abbrev = extract_station_names(joinpath(parent_dir, "Data", "Station Abbreviation.xlsx"), save_to_csv = true, filename = "StationAbbreviation.csv")
+# routes = build_route_map(df_timetable, save_to_csv = true, filename = "train_routes.csv")
+
+# println(first(df_new, 5))
 #println(first(routes, 5))
 
 # Save the routes DataFrame to a CSV file
