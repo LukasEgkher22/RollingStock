@@ -52,7 +52,7 @@ end
 #predefined_train_ids = Set([738, 731])
 #timetable_data = filter(row -> row.TrainId in predefined_train_ids, timetable_data)
 
-timetable_data = timetable_data[1:2, :]
+timetable_data = timetable_data[1:50, :]
 print("\nFiltered timetable has ", nrow(timetable_data), " trips.\n")
 
 
@@ -77,7 +77,7 @@ N = Unit_availability
 stations = unique(timetable_data.FromStation ∪ timetable_data.ToStation)
 
 n_trips = nrow(timetable_data)
-timetable_data.Id = 1:n_trips
+timetable_data.Index = 1:n_trips
 print(timetable_data)
 
 # -----------------------------------------------------------
@@ -132,8 +132,8 @@ for s in stations
     arrs = filter(r -> r.ToStation == s, timetable_data)
     
     events = []
-    for r in eachrow(deps) push!(events, (time=r.DepartureFromStation, type=:dep, id=r.Id)) end
-    for r in eachrow(arrs) push!(events, (time=r.ArrivalToStation, type=:arr, id=r.Id)) end
+    for r in eachrow(deps) push!(events, (time=r.DepartureFromStation, type=:dep, index=r.Index)) end
+    for r in eachrow(arrs) push!(events, (time=r.ArrivalToStation, type=:arr, index=r.Index)) end
     
     # Sort events: Arrivals at the same time as departures are processed FIRST
     sort!(events, by = x -> (x.time, x.type == :dep))
@@ -142,8 +142,8 @@ for s in stations
         for i in 1:length(events)
             # We look at the "state" of unit (m,n) at station s after event i
             current_events = events[1:i]
-            arr_so_far = [e.id for e in current_events if e.type == :arr]
-            dep_so_far = [e.id for e in current_events if e.type == :dep]
+            arr_so_far = [e.index for e in current_events if e.type == :arr]
+            dep_so_far = [e.index for e in current_events if e.type == :dep]
             
             # Unit (m,n) is at station s ONLY if it started there or arrived there, 
             # and hasn't left yet. This value must be 0 or 1.
@@ -246,7 +246,7 @@ if termination_status(model) == OPTIMAL
                     trip = timetable_data[j, :]
                     println("    Trip $j: ", trip.FromStation, " -> ", trip.ToStation, 
                             " (Depart: ", trip.DepartureFromStation, ", Arrive: ", trip.ArrivalToStation, 
-                            ", Demand: ", trip.Demand, ")")
+                            ", TrainId: ", trip.TrainId, ", Demand: ", trip.Demand, ")")
                 end
                 
                 # Ending station
