@@ -1,9 +1,10 @@
 using EzXML
 using DataFrames
+using Printf
 
 
 """
-Reads the passenger XML file.
+Reads the passenger XML file
 
 Arguments
 - `file_path::AbstractString`: Path to the passenger XML file to parse.
@@ -113,8 +114,10 @@ function parse_timetable_xml(file_path::AbstractString, target_date::Union{Abstr
                 TrainCategory = String(train_category),
                 TrainId       = String(train_id_val),
                 Station       = haskey(entry_node, "posID") ? entry_node["posID"] : "",
-                Arrival       = haskey(entry_node, "arrival") ? entry_node["arrival"] : "",
-                Departure     = haskey(entry_node, "departure") ? entry_node["departure"] : "",
+                Arrival       = (haskey(entry_node, "arrivalDay") && haskey(entry_node, "arrival")) ?
+                                (entry_node["arrivalDay"] == "1" ? add_24h_offset(entry_node["arrival"]) : entry_node["arrival"]) : "",
+                Departure     = (haskey(entry_node, "departureDay") && haskey(entry_node, "departure")) ?
+                                (entry_node["departureDay"] == "1" ? add_24h_offset(entry_node["departure"]) : entry_node["departure"]) : "",
                 Type          = haskey(entry_node, "type") ? entry_node["type"] : ""
             )
             push!(data_rows, row)
@@ -382,6 +385,40 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
 end
 
 
+
+"""
+Extract station names from an Excel file and optionally save to CSV.
+
+# Arguments
+- `path::String`: Path to the Excel file.
+- `save_to_csv::Bool`: If true, save the resulting DataFrame to CSV file. Default is false.
+- `filename::String`: Name of the output CSV file. Default is "station_names.csv".
+
+# Returns
+- `DataFrame`: Table with columns "Abbreviations" and "Long Name".
+"""
+function extract_station_names(path::String; save_to_csv::Bool = false, filename::String = "station_names.csv")
+    # Open the excel file
+    xf = XLSX.readxlsx(path)
+    sheet = xf[1] 
+    data = XLSX.gettable(sheet) |> DataFrame
+    
+    # Select the 2nd and 3rd columns by index and clean the station names
+    df = data[:, [2, 3]]
+    df[:, 1] = map(name -> occursin("/", name) ? name : name * "/86", df[:, 1]) # add danish suffix, if no suffix is given
+    rename!(df, [1 => "Abbreviations", 2 => "Long Name"])
+    
+    if save_to_csv
+        sort!(df, :Abbreviations)
+        CSV.write(filename, df)
+        println("Saved to $filename")
+    end
+    
+    return df
+end
+
+
+
 """
 Find adjacent stations to a given station across all routes.
 
@@ -425,33 +462,20 @@ end
 
 
 """
-Extract station names from an Excel file and optionally save to CSV.
+Add 24 hours to a given time string, effectively shifting it to the next day.
 
 # Arguments
-- `path::String`: Path to the Excel file.
-- `save_to_csv::Bool`: If true, save the resulting DataFrame to CSV file. Default is false.
-- `filename::String`: Name of the output CSV file. Default is "station_names.csv".
+- `time_str::String`: A time string in the format "HH:MM:SS" or "HH:MM". Empty strings are handled gracefully.
 
 # Returns
-- `DataFrame`: Table with columns "Abbreviations" and "Long Name".
+- `String`: The adjusted time string with 24 hours added, formatted as "HH:MM:SS" with leading zeros for single-digit components.
 """
-function extract_station_names(path::String; save_to_csv::Bool = false, filename::String = "station_names.csv")
-    # Open the excel file
-    xf = XLSX.readxlsx(path)
-    sheet = xf[1] 
-    data = XLSX.gettable(sheet) |> DataFrame
-    
-    # Select the 2nd and 3rd columns by index and clean the station names
-    df = data[:, [2, 3]]
-    df[:, 1] = map(name -> occursin("/", name) ? name : name * "/86", df[:, 1]) # add danish suffix, if no suffix is given
-    rename!(df, [1 => "Abbreviations", 2 => "Long Name"])
-    
-    if save_to_csv
-        sort!(df, :Abbreviations)
-        CSV.write(filename, df)
-        println("Saved to $filename")
-    end
-    
-    return df
-end
 
+function add_24h_offset(time_str::String)
+    parts = split(time_str, ":")
+    h = parse(Int, parts[1]) + 24
+    m = parse(Int, parts[2])
+    # Use existing seconds if available, otherwise "00"
+    s = length(parts) >= 3 ? parse(Int, parts[3]) : 0
+    return @sprintf("%02d:%02d:%02d", h, m, s)
+end
