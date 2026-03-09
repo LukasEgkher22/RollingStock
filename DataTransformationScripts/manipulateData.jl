@@ -1,4 +1,4 @@
-using CSV
+using CSV, XLSX
 include("functions.jl")
 
 
@@ -11,15 +11,14 @@ parent_dir = dirname(dirname(@__FILE__))
 # df_passenger = parse_passenger_xml(file_path_passenger, save_to_csv = true, filename = "passenger_data.csv")
 # df_timetable = parse_timetable_xml(file_path_timetable, save_to_csv = true, filename = "timetable_data.csv")
 # df_infra = parse_infrastructure_xml(file_path_infrastructure, save_to_csv = true, filename = "infrastructure_data.csv")
-# df_abbreviations = extract_station_names(joinpath(project_root, "Data", "Station Abbreviation.xlsx"))
 
 # routes = build_route_map(df_timetable, save_to_csv = true, filename = "train_routes.csv")
 
 # df_new = merge_data(df_timetable, df_passenger, df_infra, save_to_csv = true, filename = "merged_data.csv")
 
-stations_abbrev = extract_station_names(joinpath(project_root, "Data", "Station Abbreviation.xlsx"), save_to_csv = true, filename = "StationAbbreviation.csv")
+stations_abbrev = extract_station_names(joinpath(parent_dir, "Data", "Station Abbreviation.xlsx"), save_to_csv = true, filename = "StationAbbreviation.csv")
 
-#println(first(df_new, 5))
+# println(first(df_new, 5))
 #println(first(routes, 5))
 
 # Save the routes DataFrame to a CSV file

@@ -180,7 +180,7 @@ end
 
 
 """
-Parses the infrastructure XML, cleans station names (removes suffix after '/'), 
+Parses the infrastructure XML, 
 and stores km distance and electrification status.
 """
 function parse_infrastructure_xml(file_path::AbstractString; save_to_csv::Bool = false, filename::String = "infrastructure_data.csv")
@@ -326,15 +326,35 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
             end
 
             # Get infrastructure data for this leg
-            st_a = train_tt.Station[idx_start]
-            st_b = train_tt.Station[idx_end]
-            route_key = st_a < st_b ? (st_a, st_b) : (st_b, st_a)
-            
-            distance_km = 0.0
-            is_electrified = false
-            if haskey(df_infrastructure, route_key)
-            distance_km = df_infrastructure[route_key].km
-            is_electrified = df_infrastructure[route_key].electrified
+             # 2. AGGREGATE INFRASTRUCTURE DATA
+            # We look at every single step in the timetable between idx_start and idx_end
+            total_distance = 0.0
+            is_fully_electrified = true
+            segment_found_count = 0
+            required_segments = idx_end - idx_start
+
+            for j in idx_start:(idx_end - 1)
+                st_a = train_tt.Station[j]
+                st_b = train_tt.Station[j+1]
+                
+                # Sort keys to match Dict format
+                route_key = st_a < st_b ? (st_a, st_b) : (st_b, st_a)
+                
+                if haskey(df_infrastructure, route_key)
+                    infra = df_infrastructure[route_key]
+                    total_distance += infra.km
+                    # If any single part is NOT electrified, the whole leg is not
+                    is_fully_electrified = is_fully_electrified && infra.electrified
+                    segment_found_count += 1
+                else
+                    @warn "Missing infrastructure data for segment: $st_a to $st_b"
+                    is_fully_electrified = false
+                end
+            end
+
+            # If no segments were found, ensure distance is 0 and electrified is false
+            if segment_found_count == 0
+                is_fully_electrified = false
             end
 
             push!(results, (
@@ -345,8 +365,8 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
                 ToStation            = train_tt.Station[idx_end],
                 ArrivalToStation     = train_tt.Arrival[idx_end],
                 Demand               = leg_demand,
-                Distance_KM          = distance_km,
-                Electrified          = is_electrified
+                Distance_KM          = round(total_distance, digits = 1),
+                Electrified          = is_fully_electrified
             ))
         end
     end
@@ -427,6 +447,7 @@ function extract_station_names(path::String; save_to_csv::Bool = false, filename
     rename!(df, [1 => "Abbreviations", 2 => "Long Name"])
     
     if save_to_csv
+        sort!(df, :Abbreviations)
         CSV.write(filename, df)
         println("Saved to $filename")
     end
