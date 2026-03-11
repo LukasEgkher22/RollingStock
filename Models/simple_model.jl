@@ -192,17 +192,17 @@ for m in electrified_m, j in non_electrified_tracks
     end
 end
 
-# I. Position-based limits (e.g., max 5 units of type 1 and 2 combined, max 1 unit of type 3, etc.)
+# I. Type-based usage constraints
 for j in 1:n_trips
     # This prevents Type 1/2 and the other types from being used together.
     @constraint(model, use_group_12[j] + sum(use_type[m, j] for m in 3:7) <= 1)
 
-    @constraint(model, sum(x[m,n,j] for m in 1:2, n in 1:N[m]) <= 5 * use_group_12[j]) # Max 5 units of type 1 and 2 combined
+    @constraint(model, sum(x[m,n,j] for m in 1:2, n in 1:N[m]) <= 5 * use_group_12[j]) # Type 1 and 2: Max 5 units combined
     for m in [3,4,6]
-        @constraint(model, sum(x[m,n,j] for n in 1:N[m]) <= 1 * use_type[m, j]) # Max 1 unit of type 3, 4 and 6
+        @constraint(model, sum(x[m,n,j] for n in 1:N[m]) <= 1 * use_type[m, j]) # Type 3, 4 and 6: Max 1 unit each
     end
-    @constraint(model, sum(x[5,n,j] for n in 1:N[5]) <= 2 * use_type[5, j]) # Max 2 units of type 5
-    @constraint(model, sum(x[7,n,j] for n in 1:N[7]) <= 4 * use_type[7, j]) # Max 4 unit of type 7
+    @constraint(model, sum(x[5,n,j] for n in 1:N[5]) <= 2 * use_type[5, j]) # Type 5: Max 2 units
+    @constraint(model, sum(x[7,n,j] for n in 1:N[7]) <= 4 * use_type[7, j]) # Type 7: Max 4 units
 end
 
 # Solve the model
