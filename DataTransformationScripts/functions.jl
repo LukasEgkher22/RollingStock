@@ -384,6 +384,40 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
     return df_merged
 end
 
+"""
+Define connecitons based on consecutive trips in the timetable
+
+# Arguments
+- `df_timetable::DataFrame`: The timetable data.
+- `save_to_csv::Bool`: If true, save the resulting DataFrame to CSV file. Default is false.
+- `filename::String`: Name of the output CSV file. Default is "connections.csv".
+
+# Returns
+- `DataFrame`: Table with columns "TrainId", "FromStation", "ConnectionStation", "ToStation", "ArrivalAtConnection", and "DepartureFromConnection".
+"""
+function build_connections(df_timetable, save_to_csv::Bool = false, filename::String = "connections.csv")
+    connections = innerjoin(
+    df_timetable, df_timetable,
+    on = [:TrainId, :ToStation => :FromStation], 
+    makeunique = true # This handles duplicate column names by adding _1
+    )
+
+    # 3. Select and rename the specific columns
+    result = select(connections,
+        :TrainId,
+        :FromStation => :FromStation,
+        :ToStation => :ConnectionStation,
+        :ToStation_1 => :ToStation,
+        :ArrivalToStation => :ArrivalAtConnection,
+        :DepartureFromStation_1 => :DepartureFromConnection
+    )
+
+    # 4. Save the result
+    CSV.write(filename, result)
+
+    return result
+end
+
 
 
 """

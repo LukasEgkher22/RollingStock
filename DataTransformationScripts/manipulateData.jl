@@ -12,8 +12,9 @@ df_passenger = parse_passenger_xml(file_path_passenger, save_to_csv = true, file
 df_timetable = parse_timetable_xml(file_path_timetable, save_to_csv = true, filename = "timetable_data.csv")
 df_infra = parse_infrastructure_xml(file_path_infrastructure, save_to_csv = true, filename = "infrastructure_data.csv")
 
-
 df_new = merge_data(df_timetable, df_passenger, df_infra, save_to_csv = true, filename = "merged_data.csv")
+
+df_connections = build_connections(df_new, save_to_csv = true, filename = "connections.csv")
 
 # stations_abbrev = extract_station_names(joinpath(parent_dir, "Data", "Station Abbreviation.xlsx"), save_to_csv = true, filename = "StationAbbreviation.csv")
 # routes = build_route_map(df_timetable, save_to_csv = true, filename = "train_routes.csv")
