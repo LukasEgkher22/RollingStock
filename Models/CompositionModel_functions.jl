@@ -26,6 +26,9 @@ function get_smaller_df(to_explore, bad_stations, timetable_data, connections)
         union!(total_stations, route)
     end
 
+    push!(neighbors, "Start")
+    push!(neighbors, "End")
+
     # Filter timetable data to only include trips that start and end at these stations
     new_timetable_data = filter(row -> (row.FromStation in neighbors) && (row.ToStation in neighbors), timetable_data)
     new_connections = filter(row -> (row.FromStation in neighbors) && (row.ToStation in neighbors), connections)
@@ -38,7 +41,7 @@ function get_coupling_matrices(compositions, unit_names)
     # 1. Pre-calculate the counts of each unit in each composition
     # This creates a nested lookup: counts_per_comp["ICA-ERF"]["ICA"] = 1
     counts_per_comp = Dict(
-        ci => Dict(mi => count(==(m), split(c, "-")) for (mi, m) in enumerate(unit_names))
+        ci => Dict(mi => (m == "start_end" ? 0 : count(==(m), split(c, "-"))) for (mi, m) in enumerate(unit_names))
         for (ci, c) in enumerate(compositions)
     )
     

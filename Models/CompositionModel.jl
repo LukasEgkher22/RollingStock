@@ -16,6 +16,8 @@ use_smaller_dataset = true
 # Read merged data from CSV
 timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "merged_data.csv"), DataFrame)
 
+timetable_data = add_terminal_rows(timetable_data)
+
 # define connections variable (Two trips are connected if FirstTrip.ToStation == SecondTrip.FromStation and FirstTrip.TrainId == SecondTrip.TrainId)
 connections = build_connections(timetable_data)
 
@@ -23,7 +25,7 @@ if use_smaller_dataset
     start_station = ["AR/86"]
     bad_stations = Set(["GP/86", "HP/86", "SNO/86", "OD/86", "TL/86", "KD/86", "LK/86", "ADF/80", "HMB/80", "PA/86", "RQ/86", "ASW/80", "AB/86", "HN/86", "HA/86", "LG/86", "BR/86"])
 
-    timetable_data, connections = get_smaller_df(start_station, bad_stations)
+    timetable_data, connections = get_smaller_df(start_station, bad_stations, timetable_data, connections)
 end
 
 # timetable_data = timetable_data[1:50, :]
@@ -34,15 +36,35 @@ excel_file = XLSX.readxlsx(joinpath(project_root, "Data", "Base Day TUE.xlsx"))
 RS_Data = DataFrame(XLSX.gettable(excel_file["Rolling Stock"]))
 night_capacity = DataFrame(XLSX.gettable(excel_file["Night capacity"]))
 compositions = DataFrame(XLSX.gettable(excel_file["Composition groups"], header=false))[!, 1]
+push!(compositions, "start_end")
+
+RS_Data.Name = push!(RS_Data.Name, "start_end")
+RS_Data[!, "Kilometer costs"] = push!(RS_Data[!, "Kilometer costs"], 0)
+RS_Data[!, "Seats"] = push!(RS_Data[!, "Seats"], 0)
+RS_Data[!, "Unit cost"] = push!(RS_Data[!, "Unit cost"], 0)
+RS_Data[!, "Availability"] = push!(RS_Data[!, "Availability"], 10000)
 
 # Access columns from rolling_stock_data
 # RS_Data[!, ["Name", "Seats", "Kilometer costs", "Unit cost", "Availability", "Electrified"]]
+
+# Get unique stations from timetable
+stations = unique(timetable_data.FromStation ∪ timetable_data.ToStation)
+
+# define number of types and units
+M = nrow(RS_Data)
+C = length(compositions)
+n_trips = nrow(timetable_data)
+N = nrow(connections)
+S = length(stations)
+time = unique(vcat(timetable_data.DepartureFromStation, timetable_data.ArrivalToStation))
+T = length(time)
 
 # Get composition counts [1:C, 1:M], coupling and decoupling matrices [1:M, 1:C, 1:C]
 comp_number, coupled_dict, decoupled_dict = get_coupling_matrices(compositions, RS_Data.Name)
 
 # Get composition costs per kilometer [1:C]
 comp_costs, comp_seats = get_composition_details(compositions, RS_Data[!, ["Kilometer costs", "Seats"]], comp_number)
+
 
 # check comp_number
 # for c in 1:C
@@ -53,7 +75,7 @@ comp_costs, comp_seats = get_composition_details(compositions, RS_Data[!, ["Kilo
 # end
 
 # check coupled_dict and uncoupled_dict
-# c1 = 19
+# c1 = 36
 # c2 = 8
 # println("Decoupling/Coupling check:\nFrom composition: ", compositions[c1], "\nTo composition: ", compositions[c2])
 # for m in 1:M
@@ -66,22 +88,14 @@ comp_costs, comp_seats = get_composition_details(compositions, RS_Data[!, ["Kilo
 # end
 # print("\n")
 
-# Check composition costs
+# # Check composition costs
 # for c in 1:C
 #     println("Composition ", c, ": ", compositions[c, 1], " - Cost per km: ", comp_costs[c], " - Seats: ", comp_seats[c])
 # end
 
-# define more sets
-
-# Get unique stations from timetable
-stations = unique(timetable_data.FromStation ∪ timetable_data.ToStation)
-
-
-# define number of types and units
-M = nrow(RS_Data)
-C = length(compositions)
-n_trips = nrow(timetable_data)
-N = nrow(connections)
+# define penalty parameters for coupling and decoupling (example: 100 per unit)
+coupling_penalty = 10
+decoupling_penalty = 10
 
 timetable_data.Index = 1:n_trips
 # print(timetable_data)
@@ -100,78 +114,29 @@ model = Model(Gurobi.Optimizer)
 @variable(model, x[c1=1:C, c2=1:C, n=1:N], Bin)
 
 # v1[m, n] defines how many units of type m are coupled in connection n, v2 for decoupling
-@variable(model, v1[m=1:M, n=1:N], >= 0)
-@variable(model, v2[m=1:M, n=1:N], >= 0)
+@variable(model, v1[m=1:M, n=1:N] >= 0)
+@variable(model, v2[m=1:M, n=1:N] >= 0)
 
+# storage[m, n, t] - non-negative number of units of type m stored at station s at time t
+@variable(model, storage[m=1:M, s=1:S, t=1:T] >= 0)
 
+# s_start[m, s] number of train units of type m starting at station s
+@variable(model, s_start[m=1:M, s=1:S] >= 0)
 
-# # x[m, n, j] = 1 if unit n of type m performs trip j
-# @variable(model, x[m=1:M, n=1:N[m], j=1:n_trips], Bin)
+# Objective: Minimize total cost (km_costs * distance)
+# TODO: add an estimate for unit costs
+@objective(model, Min, sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:n_trips) # distance costs for each composition used
+    + sum(v1[m, n] * coupling_penalty for m in 1:M, n in 1:N)   # make coupling/decoupling less attractive
+    + sum(v2[m, n] * decoupling_penalty for m in 1:M, n in 1:N)
+    + sum(sum(s_start[m, s] for s in 1:S) * RS_Data[!, "Unit cost"][m] for m in 1:M) # unit cost for each unit that starts
+)
 
-# # s_start[m, n, s] = 1 if unit (m,n) starts the day at station s
-# @variable(model, s_start[m=1:M, n=1:N[m], s=stations], Bin)
-
-# # s_end[m, n, s] = 1 if unit (m,n) ends the day at station s
-# @variable(model, s_end[m=1:M, n=1:N[m], s=stations], Bin)
-
-# # use type of train m for trip j
-# @variable(model, use_group_12[1:n_trips], Bin) # 1 if trip uses Type 1 or 2
-# @variable(model, use_type[3:7, 1:n_trips], Bin) # 1 if trip uses Type m (3,4,5,6,7)
-
-# Objective: Minimize total cost (km_costs * distance) TODO: add an estimate for unit costs
-@objective(model, Min, sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:n_trips))
-
-# # --- 2. Constraints ---
-
-# # A. A unit either starts and ends or is not used at all
-# for m in 1:M, n in 1:N[m]
-#     @constraint(model, sum(s_start[m, n, s] for s in stations) <= 1)
-#     @constraint(model, sum(s_end[m, n, s] for s in stations) <= 1)
-#     @constraint(model, sum(s_start[m, n, s] for s in stations) == sum(s_end[m, n, s] for s in stations)) # If it starts somewhere, it must end somewhere
-# end
-
-# # A.2 Flow conservation at stations (all that arrives or is already there, must also depart, or end there)
-# for m in 1:M, s in stations
-#     # For each station, the number of units arriving must equal the number departing (flow conservation)
-#     @constraint(model, 
-#         sum(s_start[m, n, s] for n in 1:N[m]) + 
-#         sum(x[m, n, j] for n in 1:N[m], j in 1:n_trips if timetable_data.ToStation[j] == s) ==
-#         sum(s_end[m, n, s] for n in 1:N[m]) + 
-#         sum(x[m, n, j] for n in 1:N[m], j in 1:n_trips if timetable_data.FromStation[j] == s)
-#     )
-# end
-
-# # B. Chronology (Preventing "Time Travel")
-# # For a specific unit at a specific station, it must have arrived BEFORE it departs.
-# for s in stations
-#     # Get all events at this station sorted by time
-#     deps = filter(r -> r.FromStation == s, timetable_data)
-#     arrs = filter(r -> r.ToStation == s, timetable_data)
-    
-#     events = []
-#     for r in eachrow(deps) push!(events, (time=r.DepartureFromStation, type=:dep, index=r.Index)) end
-#     for r in eachrow(arrs) push!(events, (time=r.ArrivalToStation, type=:arr, index=r.Index)) end
-    
-#     # Sort events: Arrivals at the same time as departures are processed FIRST
-#     sort!(events, by = x -> (x.time, x.type == :dep))
-
-#     for m in 1:M, n in 1:N[m]
-#         for i in 1:length(events)
-#             # We look at the "state" of unit (m,n) at station s after event i
-#             current_events = events[1:i]
-#             arr_so_far = [e.index for e in current_events if e.type == :arr]
-#             dep_so_far = [e.index for e in current_events if e.type == :dep]
-            
-#             # Unit (m,n) is at station s ONLY if it started there or arrived there, 
-#             # and hasn't left yet. This value must be 0 or 1.
-#             @constraint(model, 
-#                 s_start[m, n, s] + 
-#                 sum(x[m, n, j] for j in arr_so_far; init=0) - 
-#                 sum(x[m, n, j] for j in dep_so_far; init=0) >= 0
-#             )
-#         end
-#     end
-# end
+# Fix composition 36 (start_end) for trips starting at "Start" or ending at "End"
+for j in 1:n_trips
+    if timetable_data.FromStation[j] == "Start" || timetable_data.ToStation[j] == "End"
+        fix(y[36, j], 1; force=true)
+    end
+end
 
 # # C. Global Station Balance (Type-based overnight requirement)
 # # "The number of units of type m starting at s must equal the number ending at s"
@@ -197,94 +162,103 @@ for n in 1:N
     @constraint(model, sum(x[c1, c2, n] for c1 in 1:C, c2 in 1:C) == 1)
 end
 
-# Define how many units of each type are decoupled and coupled in a connection 
+# Define how many units of each type are decoupled and coupled in a connection
+for m in 1:M, n in 1:N
+    @constraint(model, v1[m, n] == sum(coupled_dict[(m, c1, c2)] * x[c1, c2, n] for c1 in 1:C, c2 in 1:C))
+    @constraint(model, v2[m, n] == sum(decoupled_dict[(m, c1, c2)] * x[c1, c2, n] for c1 in 1:C, c2 in 1:C))
+end
 
-# # E. Symmetry Breaking
-# # for each type, unit n can only perform trips if unit n-1 is also performing trips (enforces order of usage)
-# for m in 1:M, n in 1:N[m]-1
-#     @constraint(model, sum(x[m, n, j] for j in 1:n_trips) >= 
-#                        sum(x[m, n+1, j] for j in 1:n_trips))
-# end
+# define storage variable
+for m in 1:M, s in 1:S, t in 1:T
+    earlier_connections = [n for n in 1:N if (connections[n, "DepartureFromConnection"] <= time[t]) && (connections[n, "ConnectionStation"] == stations[s])]
+    @constraint(model, storage[m, s, t] == s_start[m, s] + sum(v2[m, n] - v1[m, n] for n in earlier_connections))
+end
 
-# # F. Link x and start (if unit does not start, it cannot perform trips
-# for m in 1:M, n in 1:N[m]
-#     @constraint(model, sum(x[m, n, j] for j in 1:n_trips) <= Unit_availability[m] * sum(s_start[m, n, s] for s in stations)) # Big-M
-# end
-
-# # G. Electrified routes can only be served by electric units
-# electrified_m = findall(==(1), Unit_electrified)
-# non_electrified_tracks = findall(==(false), timetable_data.Electrified)
-# for m in electrified_m, j in non_electrified_tracks
-#     for n in 1:N[m]
-#         fix(x[m, n, j], 0; force=true)
-#     end
-# end
-
-# # I. Type-based usage constraints
-# for j in 1:n_trips
-#     # This prevents Type 1/2 and the other types from being used together.
-#     @constraint(model, use_group_12[j] + sum(use_type[m, j] for m in 3:7) <= 1)
-
-#     @constraint(model, sum(x[m,n,j] for m in 1:2, n in 1:N[m]) <= 5 * use_group_12[j]) # Type 1 and 2: Max 5 units combined
-#     for m in [3,4,6]
-#         @constraint(model, sum(x[m,n,j] for n in 1:N[m]) <= 1 * use_type[m, j]) # Type 3, 4 and 6: Max 1 unit each
-#     end
-#     @constraint(model, sum(x[5,n,j] for n in 1:N[5]) <= 2 * use_type[5, j]) # Type 5: Max 2 units
-#     @constraint(model, sum(x[7,n,j] for n in 1:N[7]) <= 4 * use_type[7, j]) # Type 7: Max 4 units
-# end
-
-# # Solve the model
-# optimize!(model)
-
-# # Print results
-# println("\n--- OPTIMIZATION RESULTS ---")
-# println("Status: ", termination_status(model))
-
-# if termination_status(model) == OPTIMAL
-#     println("Total Cost: \$", round(objective_value(model), digits=2))
+# for each trip j, if composition c is assigned, then the required units must be available at the departure station at the departure time
+# for j in 1:n_trips, c in 1:C
+#     departure_time = timetable_data.DepartureFromStation[j]
+#     departure_station = timetable_data.FromStation[j]
+#     required_units = comp_number[c]
     
-#     println("\n--- UNIT ROUTING DETAILS ---")
-#     for m in 1:M
-#         println("\nUnit Type: ", Unit_name[m], " (Seats: ", Unit_seats[m], ")")
-#         for n in 1:N[m]
-#             assigned_trips = findall(j -> value(x[m, n, j]) > 0.5, 1:n_trips)
-#             # for j in assigned_trips
-#             #     print("  Value of x[", m, ", ", n, ", ", j, "]: ", [value(x[m, n, j])], "\n")
-                
-#             # end
-#             # for s in stations
-#             #     if value(s_start[m, n, s]) > 0.5 || value(s_end[m, n, s]) > 0.5
-#             #         print("  Value of s_start[", m, ", ", n, ", ", s, "]: ", [value(s_start[m, n, s])], "\n")
-#             #         print("  Value of s_end[", m, ", ", n, ", ", s, "]: ", [value(s_end[m, n, s])], "\n")
-#             #     end 
-#             # end
-            
-            
-#             if !isempty(assigned_trips)
-#                 println("  Unit #$n:")
-                
-#                 # Starting station
-#                 start_station = [s for s in stations if value(s_start[m, n, s]) > 0.5]
-#                 if !isempty(start_station)
-#                     println("    Start at: ", start_station[1])
-#                 end
-                
-#                 # Trips
-#                 for j in sort(assigned_trips, by = i -> timetable_data.DepartureFromStation[i])
-#                     trip = timetable_data[j, :]
-#                     println("    Trip $j: ", trip.FromStation, " -> ", trip.ToStation, 
-#                             " (Depart: ", trip.DepartureFromStation, ", Arrive: ", trip.ArrivalToStation, 
-#                             ", TrainId: ", trip.TrainId, ", Demand: ", trip.Demand, ")")
-#                 end
-                
-#                 # Ending station
-#                 end_station = [s for s in stations if value(s_end[m, n, s]) > 0.5]
-#                 if !isempty(end_station)
-#                     println("    End at: ", end_station[1])
-#                 end
-#             end
+#     # Find the time index for the departure time
+#     t_idx = findfirst(==(departure_time), time)
+#     s_idx = findfirst(==(departure_station), stations)
+    
+#     if t_idx !== nothing && s_idx !== nothing
+#         for m in 1:M
+#             @constraint(model, storage[m, s_idx, t_idx] >= required_units[m] * y[c, j])
 #         end
 #     end
-# else
-#     println("No optimal solution found.")
 # end
+
+# model capacity constraint per type over s_start variable
+for m in 1:M
+    @constraint(model, sum(s_start[m, s] for s in 1:S) <= RS_Data.Availability[m])
+end
+
+# Solve the model
+optimize!(model)
+
+# Print results
+println("\n--- OPTIMIZATION RESULTS ---")
+println("Status: ", termination_status(model))
+
+if termination_status(model) == OPTIMAL
+    println("Total Cost: \$", round(objective_value(model), digits=2))
+
+    println("\n--- COMPOSITION ASSIGNMENTS ---")
+    # Collect assignments
+    assignments = DataFrame(
+        TripId = Int[],
+        TrainId = Int[],
+        FromStation = String[],
+        ToStation = String[],
+        Departure = String[],
+        Arrival = String[],
+        Demand = Int[],
+        Composition = String[]
+    )
+
+    for j in 1:n_trips
+        assigned_comps = [c for c in 1:C if value(y[c, j]) > 0.5]
+        for c in assigned_comps
+            push!(assignments, (
+                TripId = j,
+                TrainId = timetable_data.TrainId[j],
+                FromStation = timetable_data.FromStation[j],
+                ToStation = timetable_data.ToStation[j],
+                Departure = timetable_data.DepartureFromStation[j],
+                Arrival = timetable_data.ArrivalToStation[j],
+                Demand = timetable_data.Demand[j],
+                Composition = string(compositions[c])
+            ))
+            # println("Trip $j (", timetable_data.FromStation[j], " -> ", timetable_data.ToStation[j], 
+            #         ", Depart: ", timetable_data.DepartureFromStation[j], 
+            #         ", Arrive: ", timetable_data.ArrivalToStation[j], 
+            #         ", TrainId: ", timetable_data.TrainId[j], 
+            #         ", Demand: ", timetable_data.Demand[j], 
+            #         ") is served by Composition $c (", compositions[c], ")")
+        end
+    end
+
+    # Group by TrainId, sort by earliest departure, and save to CSV
+    grouped = groupby(assignments, :TrainId)
+    ordered_assignments = DataFrame()
+    for g in grouped
+        sorted_g = sort(g, :Departure)
+        append!(ordered_assignments, sorted_g)
+    end
+    CSV.write(joinpath(project_root, "results_composition_assignments.csv"), ordered_assignments)
+
+    println("\n--- STARTING TRAINS AT STATIONS ---")
+    for m in 1:M
+        for s in 1:S
+            n_start = value(s_start[m, s])
+            if n_start > 0.5
+                println("Type: ", RS_Data.Name[m], " starts ", round(n_start), " trains at station ", stations[s])
+            end
+        end
+    end
+else
+    println("No optimal solution found.")
+end
