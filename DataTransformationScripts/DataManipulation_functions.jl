@@ -80,7 +80,7 @@ Reads the timetable XML file and saves a DataFrame from it.
 - Removes country code suffixes from station identifiers (e.g., "/86" from posID)
 - Handles cases where trainID components may be missing by using "Unknown" as fallback
 """
-function parse_timetable_xml(file_path::AbstractString, target_date::Union{AbstractString, Nothing} = "2026-06-02"; save_to_csv::Bool = false, filename::String = "timetable_data.csv")
+function parse_timetable_xml(file_path::AbstractString; target_date::Union{AbstractString, Nothing} = "2026-06-02", save_to_csv::Bool = false, filename::String = "timetable_data.csv")
     doc = readxml(file_path)
     data_rows = []
 
@@ -384,6 +384,90 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
     return df_merged
 end
 
+"""
+Define connecitons based on consecutive trips in the timetable
+
+# Arguments
+- `df_timetable::DataFrame`: The timetable data.
+- `save_to_csv::Bool`: If true, save the resulting DataFrame to CSV file. Default is false.
+- `filename::String`: Name of the output CSV file. Default is "connections.csv".
+
+# Returns
+- `DataFrame`: Table with columns "TrainId", "FromStation", "ConnectionStation", "ToStation", "ArrivalAtConnection", and "DepartureFromConnection".
+"""
+function build_connections(df_timetable; save_to_csv::Bool = false, filename::String = "connections.csv")
+    connections = innerjoin(
+        df_timetable, df_timetable,
+        on = [:TrainId, :ToStation => :FromStation], 
+        makeunique = true # This handles duplicate column names by adding _1
+    )
+
+    # 3. Select and rename the specific columns
+    result = select(connections,
+        :TrainId,
+        :FromStation => :FromStation,
+        :ToStation => :ConnectionStation,
+        :ToStation_1 => :ToStation,
+        :ArrivalToStation => :ArrivalAtConnection,
+        :DepartureFromStation_1 => :DepartureFromConnection
+    )
+
+    # 4. Handle unmatched start and end stations
+    for train_id in unique(df_timetable.TrainId)
+        train_data = sort!(filter(row -> row.TrainId == train_id, df_timetable), :ArrivalToStation)
+        
+        # Find first station (start of route)
+        first_row = train_data[1, :]
+        first_from = first_row.FromStation
+        first_departure = first_row.DepartureFromStation
+        
+        # Check if first station is in results
+        if !any(row -> row.TrainId == train_id && row.ConnectionStation == first_from, eachrow(result))
+            push!(result, (
+                TrainId = train_id,
+                FromStation = "Start",
+                ConnectionStation = first_from,
+                ToStation = train_data[1, :ToStation],
+                ArrivalAtConnection = first_departure,
+                DepartureFromConnection = first_departure
+            ))
+        end
+        
+        # Find last station (end of route)
+        last_row = train_data[end, :]
+        last_to = last_row.ToStation
+        last_arrival = last_row.ArrivalToStation
+        
+        # Check if last station is in results
+        if !any(row -> row.TrainId == train_id && row.ConnectionStation == last_to, eachrow(result))
+            push!(result, (
+                TrainId = train_id,
+                FromStation = train_data[end, :FromStation],
+                ConnectionStation = last_to,
+                ToStation = "End",
+                ArrivalAtConnection = last_arrival,
+                DepartureFromConnection = last_arrival
+            ))
+        end
+    end
+
+    # Sort by TrainId, then according to the order of trips (Start -> stops -> End)
+    sort!(result, [:TrainId, :FromStation, :ArrivalAtConnection];
+        by = [
+            identity,                                       # 1. Sort by TrainId normally
+            s -> (s == "Start" ? 0 : 1),                    # 2. Within train, order stations
+            identity                                        # 3. For intermediate stations, sort by time
+        ]
+    )
+    
+    if save_to_csv
+        CSV.write(filename, result)
+        println("Connections saved to $filename")
+    end
+
+    return result
+end
+
 
 
 """
@@ -478,4 +562,89 @@ function add_24h_offset(time_str::String)
     # Use existing seconds if available, otherwise "00"
     s = length(parts) >= 3 ? parse(Int, parts[3]) : 0
     return @sprintf("%02d:%02d:%02d", h, m, s)
+end
+
+
+"""
+Add trips for "Start" and "End" to represent the origin and destination of each train's journey.
+
+This function processes train data by identifying terminal stations—stations that appear as starting 
+points or endpoints in the network—and creates synthetic rows to represent these empty trips.
+
+# Details
+
+- **Start rows**: Created for stations that appear in 'From' but never in 'To', representing the 
+  origin of the train's journey. The departure time is set to the first departure time from that station.
+- **End rows**: Created for stations that appear in 'To' but never in 'From', representing the 
+  final destination. The arrival time is set to the last arrival time to that station.
+- Both terminal rows have zero demand and distance.
+
+# Returns
+- `DataFrame`: Original data with added terminal rows for each train, sorted by train ID, 
+  arrival time, and station name (with "End" rows appearing last).
+"""
+function add_terminal_rows(df::DataFrame)
+    # Create an empty DataFrame with the same structure to store results
+    new_df = DataFrame()
+    
+    # Process each train individually
+    for sub_df in groupby(df, :TrainId)
+        # 1. Identify Start: Stations in 'From' that are never in 'To'
+        starts = setdiff(sub_df.FromStation, sub_df.ToStation)
+        
+        # 2. Identify End: Stations in 'To' that are never in 'From'
+        ends = setdiff(sub_df.ToStation, sub_df.FromStation)
+        
+        # Create a container for this train's new rows
+        train_terminal_rows = DataFrame()
+        
+        # Build "Start" rows
+        for s in starts
+            # Find the original row where this station first appears
+            orig = sub_df[findfirst(==(s), sub_df.FromStation), :]
+            push!(train_terminal_rows, (
+                TrainCategory = orig.TrainCategory,
+                TrainId = orig.TrainId,
+                FromStation = "Start",
+                DepartureFromStation = orig.DepartureFromStation,
+                ToStation = s,
+                ArrivalToStation = orig.DepartureFromStation, # Use the departure time as arrival
+                Demand = 0,
+                Distance_KM = 0.0,
+                Electrified = true
+            ))
+        end
+        
+        # Build "End" rows
+        for e in ends
+            # Find the original row where this station last appears
+            orig = sub_df[findfirst(==(e), sub_df.ToStation), :]
+            push!(train_terminal_rows, (
+                TrainCategory = orig.TrainCategory,
+                TrainId = orig.TrainId,
+                FromStation = e,
+                DepartureFromStation = orig.ArrivalToStation, # Use the arrival time as departure
+                ToStation = "End",
+                ArrivalToStation = orig.ArrivalToStation,
+                Demand = 0,
+                Distance_KM = 0.0,
+                Electrified = true
+            ))
+        end
+        
+        # Combine the new terminal rows with the original data for this train
+        append!(new_df, vcat(sub_df, train_terminal_rows))
+    end
+    
+    # Finally, sort the result to keep TrainIds together and terminal rows in place
+    # "Start" rows will have the earliest time, "End" rows the latest.
+    sort!(new_df, [:TrainId, :ArrivalToStation, :ToStation], 
+        by = [
+            identity, 
+            identity, 
+            x -> x == "End" ? 2 : 1 # Ensures 'End' comes after the actual station name
+        ]
+    )
+    
+    return new_df
 end
