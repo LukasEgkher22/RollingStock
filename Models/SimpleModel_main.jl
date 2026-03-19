@@ -6,7 +6,7 @@ using XLSX
 
 project_root = dirname(@__DIR__)
 
-include(joinpath(project_root, "DataTransformationScripts", "functions.jl"))
+include(joinpath(project_root, "DataTransformationScripts", "DataManipulation_functions.jl"))
 
 # parameters
 use_smaller_dataset = true

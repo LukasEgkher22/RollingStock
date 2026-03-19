@@ -80,7 +80,7 @@ Reads the timetable XML file and saves a DataFrame from it.
 - Removes country code suffixes from station identifiers (e.g., "/86" from posID)
 - Handles cases where trainID components may be missing by using "Unknown" as fallback
 """
-function parse_timetable_xml(file_path::AbstractString, target_date::Union{AbstractString, Nothing} = "2026-06-02"; save_to_csv::Bool = false, filename::String = "timetable_data.csv")
+function parse_timetable_xml(file_path::AbstractString; target_date::Union{AbstractString, Nothing} = "2026-06-02", save_to_csv::Bool = false, filename::String = "timetable_data.csv")
     doc = readxml(file_path)
     data_rows = []
 
@@ -565,6 +565,24 @@ function add_24h_offset(time_str::String)
 end
 
 
+"""
+Add trips for "Start" and "End" to represent the origin and destination of each train's journey.
+
+This function processes train data by identifying terminal stations—stations that appear as starting 
+points or endpoints in the network—and creates synthetic rows to represent these empty trips.
+
+# Details
+
+- **Start rows**: Created for stations that appear in 'From' but never in 'To', representing the 
+  origin of the train's journey. The departure time is set to the first departure time from that station.
+- **End rows**: Created for stations that appear in 'To' but never in 'From', representing the 
+  final destination. The arrival time is set to the last arrival time to that station.
+- Both terminal rows have zero demand and distance.
+
+# Returns
+- `DataFrame`: Original data with added terminal rows for each train, sorted by train ID, 
+  arrival time, and station name (with "End" rows appearing last).
+"""
 function add_terminal_rows(df::DataFrame)
     # Create an empty DataFrame with the same structure to store results
     new_df = DataFrame()

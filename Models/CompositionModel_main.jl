@@ -7,7 +7,7 @@ using XLSX
 
 project_root = dirname(@__DIR__)
 
-include(joinpath(project_root, "DataTransformationScripts", "functions.jl"))
+include(joinpath(project_root, "DataTransformationScripts", "DataManipulation_functions.jl"))
 include(joinpath(project_root, "Models", "CompositionModel_functions.jl"))
 
 # parameters

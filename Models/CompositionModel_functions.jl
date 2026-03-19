@@ -3,6 +3,25 @@ using DataFrames
 project_root = dirname(@__DIR__)
 include(joinpath(project_root, "DataTransformationScripts", "functions.jl"))
 
+"""
+This function `get_smaller_df` filters train network data to a subset of stations and their connections:
+
+**Key steps:**
+1. Loads train routes from a CSV file and parses route strings into arrays
+2. Uses a breadth-first search (via `to_explore` set) to find all neighbor stations connected to initial stations, excluding `bad_stations`
+3. Builds a `neighbors` set containing all reachable stations, plus "Start" and "End" special stations
+4. Filters both the timetable and connections DataFrames to only include trips between stations in the `neighbors` set
+5. Prints summary statistics showing the reduction in stations and trips
+
+**Parameters:**
+- `to_explore`: Initial set of stations to explore
+- `bad_stations`: Stations to exclude from traversal
+- `timetable_data`: Full timetable DataFrame to filter
+- `connections`: Full connections DataFrame to filter
+
+**Returns:** Filtered `new_timetable_data` and `new_connections` DataFrames
+"""
+
 function get_smaller_df(to_explore, bad_stations, timetable_data, connections)
     # Read train routes and filter for routes left of Odense (OD)
     train_routes = CSV.read(joinpath(project_root, "DataManipulated", "train_routes.csv"), DataFrame)
@@ -37,6 +56,26 @@ function get_smaller_df(to_explore, bad_stations, timetable_data, connections)
     return new_timetable_data, new_connections
 end
 
+"""
+Calculates coupling and decoupling matrices for rolling stock compositions.
+
+This function analyzes the differences in unit composition between source and destination 
+compositions, determining which units need to be coupled (added) and which need to be 
+decoupled (removed) for each transition.
+
+# Arguments
+- `compositions::Vector`: A vector of composition identifiers, where each composition is 
+  represented as a dash-separated string of unit names (e.g., "ICA-ERF-ICA")
+- `unit_names::Vector`: A vector of unit names corresponding to the rolling stock types
+
+# Returns
+- `counts_per_comp::Dict`: A nested dictionary mapping (composition_index => (unit_index => count))
+  that stores the quantity of each unit type in each composition
+- `coupled::Dict{Tuple{Int, Int, Int}, Int}`: A dictionary with keys (unit, from_composition, to_composition)
+  storing the number of units to couple (add) during composition transitions
+- `decoupled::Dict{Tuple{Int, Int, Int}, Int}`: A dictionary with keys (unit, from_composition, to_composition)
+  storing the number of units to decouple (remove) during composition transitions
+"""
 function get_coupling_matrices(compositions, unit_names)
     # 1. Pre-calculate the counts of each unit in each composition
     # This creates a nested lookup: counts_per_comp["ICA-ERF"]["ICA"] = 1
@@ -67,6 +106,26 @@ function get_coupling_matrices(compositions, unit_names)
     return counts_per_comp, coupled, decoupled
 end
 
+
+"""
+Calculates operational details for each rolling stock composition.
+
+This function computes aggregated metrics for each composition by summing unit-level 
+specifications (costs and seating capacity) weighted by their occurrence in the composition.
+
+# Arguments
+- `compositions::Vector`: A vector of composition identifiers
+- `RS_Details::DataFrame`: A DataFrame containing unit specifications with columns including
+  "Kilometer costs" and "Seats"
+- `counts_per_comp::Dict`: A nested dictionary from `get_coupling_matrices()` mapping 
+  composition indices to unit counts
+
+# Returns
+- `comp_costs::Dict{Int, Int}`: A dictionary mapping composition index to total operating cost
+  (sum of per-kilometer costs for all units in the composition)
+- `comp_seats::Dict{Int, Int}`: A dictionary mapping composition index to total seating capacity
+  (sum of seats for all units in the composition)
+"""
 function get_composition_details(compositions, RS_Details, counts_per_comp)
     # Initialize the dictionary for composition costs
     comp_costs = Dict{Int, Int}()
