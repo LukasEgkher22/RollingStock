@@ -1,7 +1,7 @@
 using DataFrames
 
 project_root = dirname(@__DIR__)
-include(joinpath(project_root, "DataTransformationScripts", "functions.jl"))
+include(joinpath(project_root, "DataTransformationScripts", "DataManipulation_functions.jl"))
 
 """
 This function `get_smaller_df` filters train network data to a subset of stations and their connections:
@@ -80,7 +80,7 @@ function get_coupling_matrices(compositions, unit_names)
     # 1. Pre-calculate the counts of each unit in each composition
     # This creates a nested lookup: counts_per_comp["ICA-ERF"]["ICA"] = 1
     counts_per_comp = Dict(
-        ci => Dict(mi => (m == "start_end" ? 0 : count(==(m), split(c, "-"))) for (mi, m) in enumerate(unit_names))
+        ci => Dict(mi => (m == "empty" ? 0 : count(==(m), split(c, "-"))) for (mi, m) in enumerate(unit_names))
         for (ci, c) in enumerate(compositions)
     )
     

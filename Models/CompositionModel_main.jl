@@ -11,14 +11,11 @@ include(joinpath(project_root, "DataTransformationScripts", "DataManipulation_fu
 include(joinpath(project_root, "Models", "CompositionModel_functions.jl"))
 
 # parameters
-use_smaller_dataset = true
+use_smaller_dataset = false
+filter_on_trainId = true
 
 # Read merged data from CSV
-timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "merged_data.csv"), DataFrame)
-
-timetable_data = add_terminal_rows(timetable_data)
-
-# define connections variable (Two trips are connected if FirstTrip.ToStation == SecondTrip.FromStation and FirstTrip.TrainId == SecondTrip.TrainId)
+timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "merged_data_with_terminals.csv"), DataFrame)
 connections = build_connections(timetable_data)
 
 if use_smaller_dataset
@@ -28,6 +25,16 @@ if use_smaller_dataset
     timetable_data, connections = get_smaller_df(start_station, bad_stations, timetable_data, connections)
 end
 
+if filter_on_trainId
+    selected_trainIds = [1199, 181, 100] # example train IDs to keep
+    timetable_data = filter(row -> row.TrainId in selected_trainIds, timetable_data)
+    connections = filter(row -> row.TrainId in selected_trainIds, connections)
+    println("Filtered timetable to ", nrow(timetable_data), " trips with TrainIds in ", selected_trainIds, ".\n")
+end
+
+
+CSV.write(joinpath(project_root, "timetableForTest.csv"), timetable_data)
+
 # timetable_data = timetable_data[1:50, :]
 # println("Reduced timetable again to ", nrow(timetable_data), " trips.\n")
 
@@ -36,16 +43,17 @@ excel_file = XLSX.readxlsx(joinpath(project_root, "Data", "Base Day TUE.xlsx"))
 RS_Data = DataFrame(XLSX.gettable(excel_file["Rolling Stock"]))
 night_capacity = DataFrame(XLSX.gettable(excel_file["Night capacity"]))
 compositions = DataFrame(XLSX.gettable(excel_file["Composition groups"], header=false))[!, 1]
-push!(compositions, "start_end")
 
-RS_Data.Name = push!(RS_Data.Name, "start_end")
+# Access columns from rolling_stock_data
+# RS_Data[!, ["Name", "Seats", "Kilometer costs", "Unit cost", "Availability", "Electrified"]]
+
+# add a "empty" composition to represent the special composition for trips starting at "Start" or ending at "End"
+push!(compositions, "empty")
+RS_Data.Name = push!(RS_Data.Name, "empty")
 RS_Data[!, "Kilometer costs"] = push!(RS_Data[!, "Kilometer costs"], 0)
 RS_Data[!, "Seats"] = push!(RS_Data[!, "Seats"], 0)
 RS_Data[!, "Unit cost"] = push!(RS_Data[!, "Unit cost"], 0)
 RS_Data[!, "Availability"] = push!(RS_Data[!, "Availability"], 10000)
-
-# Access columns from rolling_stock_data
-# RS_Data[!, ["Name", "Seats", "Kilometer costs", "Unit cost", "Availability", "Electrified"]]
 
 # Get unique stations from timetable
 stations = unique(timetable_data.FromStation ∪ timetable_data.ToStation)
@@ -135,6 +143,8 @@ model = Model(Gurobi.Optimizer)
 for j in 1:n_trips
     if timetable_data.FromStation[j] == "Start" || timetable_data.ToStation[j] == "End"
         fix(y[36, j], 1; force=true)
+    else
+        fix(y[36, j], 0; force=true)
     end
 end
 
@@ -157,9 +167,28 @@ for j in 1:n_trips
     @constraint(model, sum(y[c, j] for c in 1:C) == 1)
 end
 
-# Each connection must have EXACTLY one composition transition assigned
-for n in 1:N
-    @constraint(model, sum(x[c1, c2, n] for c1 in 1:C, c2 in 1:C) == 1)
+# If composition c is used for trip j, then the connection variable x must be set to 1 for the corresponding connection
+for j in 1:n_trips
+
+    # connections n where trip j is the first trip (FromStation) in the connection
+    connections_first = [n for n in 1:N if connections[n, "FromStation"] == timetable_data.FromStation[j] && connections[n, "TrainId"] == timetable_data.TrainId[j]]
+
+    if length(connections_first) >= 1
+        # println("Trip $j has ", length(connections_first), " connections where it is the first trip. Connections: ", connections_first)
+        for c in 1:C
+            @constraint(model, sum(x[c, c2, n] for c2 in 1:C, n in connections_first) == y[c, j])
+        end
+    end
+
+    # connections n where trip j is the second trip (ToStation) in the connection
+    connections_second = [n for n in 1:N if connections[n, "ToStation"] == timetable_data.ToStation[j] && connections[n, "TrainId"] == timetable_data.TrainId[j]]
+
+    if length(connections_second) >= 1
+        # println("Trip $j has ", length(connections_second), " connections where it is the second trip. Connections: ", connections_second)
+        for c in 1:C
+            @constraint(model, sum(x[c1, c, n] for c1 in 1:C, n in connections_second) == y[c, j])
+        end
+    end
 end
 
 # Define how many units of each type are decoupled and coupled in a connection
@@ -192,9 +221,9 @@ end
 # end
 
 # model capacity constraint per type over s_start variable
-for m in 1:M
-    @constraint(model, sum(s_start[m, s] for s in 1:S) <= RS_Data.Availability[m])
-end
+# for m in 1:M
+#     @constraint(model, sum(s_start[m, s] for s in 1:S) <= RS_Data.Availability[m])
+# end
 
 # Solve the model
 optimize!(model)
@@ -206,7 +235,6 @@ println("Status: ", termination_status(model))
 if termination_status(model) == OPTIMAL
     println("Total Cost: \$", round(objective_value(model), digits=2))
 
-    println("\n--- COMPOSITION ASSIGNMENTS ---")
     # Collect assignments
     assignments = DataFrame(
         TripId = Int[],
@@ -259,6 +287,46 @@ if termination_status(model) == OPTIMAL
             end
         end
     end
+
+    println("\n--- COMPOSITION TRANSITIONS ---")
+    for n in 1:N
+        station = connections[n, "ConnectionStation"]
+        departure_time = connections[n, "DepartureFromConnection"]
+        
+        assigned_comps = [(c1, c2) for c1 in 1:C, c2 in 1:C if value(x[c1, c2, n]) > 0.5]
+        
+        for (c1, c2) in assigned_comps
+            for m in 1:M
+                decoupled = value(v2[m, n])
+                coupled = value(v1[m, n])
+                if decoupled > 0.5 || coupled > 0.5
+                    println("\nStation: $station, Departure: $departure_time")
+                    println("  Composition before: $(compositions[c1])")
+                    println("  Composition after: $(compositions[c2])")
+                    if decoupled > 0.5
+                        println("    Decoupled: $(round(Int, decoupled)) × $(RS_Data.Name[m])")
+                    end
+                    if coupled > 0.5
+                        println("    Coupled: $(round(Int, coupled)) × $(RS_Data.Name[m])")
+                    end
+                end
+            end
+        end
+    end
+
+    println("\n--- STORAGE OVER TIME ---")
+    for m in 1:M
+        for s in 1:S
+            storage_times = [(time[t], value(storage[m, s, t])) for t in 1:T if value(storage[m, s, t]) > 0.5]
+            if !isempty(storage_times)
+                println("Type: $(RS_Data.Name[m]), Station: $(stations[s])")
+                for (t, storage_val) in storage_times
+                    println("  Time: $t, Units: $(round(Int, storage_val))")
+                end
+            end
+        end
+    end
+    
 else
     println("No optimal solution found.")
 end

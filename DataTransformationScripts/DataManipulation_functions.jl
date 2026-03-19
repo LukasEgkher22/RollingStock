@@ -413,43 +413,43 @@ function build_connections(df_timetable; save_to_csv::Bool = false, filename::St
     )
 
     # 4. Handle unmatched start and end stations
-    for train_id in unique(df_timetable.TrainId)
-        train_data = sort!(filter(row -> row.TrainId == train_id, df_timetable), :ArrivalToStation)
+    # for train_id in unique(df_timetable.TrainId)
+    #     train_data = sort!(filter(row -> row.TrainId == train_id, df_timetable), :ArrivalToStation)
         
-        # Find first station (start of route)
-        first_row = train_data[1, :]
-        first_from = first_row.FromStation
-        first_departure = first_row.DepartureFromStation
+    #     # Find first station (start of route)
+    #     first_row = train_data[1, :]
+    #     first_from = first_row.FromStation
+    #     first_departure = first_row.DepartureFromStation
         
-        # Check if first station is in results
-        if !any(row -> row.TrainId == train_id && row.ConnectionStation == first_from, eachrow(result))
-            push!(result, (
-                TrainId = train_id,
-                FromStation = "Start",
-                ConnectionStation = first_from,
-                ToStation = train_data[1, :ToStation],
-                ArrivalAtConnection = first_departure,
-                DepartureFromConnection = first_departure
-            ))
-        end
+    #     # Check if first station is in results
+    #     if !any(row -> row.TrainId == train_id && row.ConnectionStation == first_from, eachrow(result))
+    #         push!(result, (
+    #             TrainId = train_id,
+    #             FromStation = "Start",
+    #             ConnectionStation = first_from,
+    #             ToStation = train_data[1, :ToStation],
+    #             ArrivalAtConnection = first_departure,
+    #             DepartureFromConnection = first_departure
+    #         ))
+    #     end
         
-        # Find last station (end of route)
-        last_row = train_data[end, :]
-        last_to = last_row.ToStation
-        last_arrival = last_row.ArrivalToStation
+    #     # Find last station (end of route)
+    #     last_row = train_data[end, :]
+    #     last_to = last_row.ToStation
+    #     last_arrival = last_row.ArrivalToStation
         
-        # Check if last station is in results
-        if !any(row -> row.TrainId == train_id && row.ConnectionStation == last_to, eachrow(result))
-            push!(result, (
-                TrainId = train_id,
-                FromStation = train_data[end, :FromStation],
-                ConnectionStation = last_to,
-                ToStation = "End",
-                ArrivalAtConnection = last_arrival,
-                DepartureFromConnection = last_arrival
-            ))
-        end
-    end
+    #     # Check if last station is in results
+    #     if !any(row -> row.TrainId == train_id && row.ConnectionStation == last_to, eachrow(result))
+    #         push!(result, (
+    #             TrainId = train_id,
+    #             FromStation = train_data[end, :FromStation],
+    #             ConnectionStation = last_to,
+    #             ToStation = "End",
+    #             ArrivalAtConnection = last_arrival,
+    #             DepartureFromConnection = last_arrival
+    #         ))
+    #     end
+    # end
 
     # Sort by TrainId, then according to the order of trips (Start -> stops -> End)
     sort!(result, [:TrainId, :FromStation, :ArrivalAtConnection];
@@ -583,7 +583,7 @@ points or endpoints in the network—and creates synthetic rows to represent the
 - `DataFrame`: Original data with added terminal rows for each train, sorted by train ID, 
   arrival time, and station name (with "End" rows appearing last).
 """
-function add_terminal_rows(df::DataFrame)
+function add_terminal_rows(df::DataFrame; save_to_csv::Bool = false, filename::String = "merged_data_with_terminals.csv")
     # Create an empty DataFrame with the same structure to store results
     new_df = DataFrame()
     
@@ -645,6 +645,10 @@ function add_terminal_rows(df::DataFrame)
             x -> x == "End" ? 2 : 1 # Ensures 'End' comes after the actual station name
         ]
     )
+    
+    if save_to_csv
+        CSV.write(filename, new_df)
+    end
     
     return new_df
 end
