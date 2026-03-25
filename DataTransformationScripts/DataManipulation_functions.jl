@@ -364,9 +364,9 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
                 TrainCategory        = t_cat,
                 TrainId              = t_id,
                 FromStation          = train_tt.Station[idx_start],
-                DepartureFromStation = train_tt.Departure[idx_start],
+                DepartureFromStation = time_string_to_minutes(train_tt.Departure[idx_start]),
                 ToStation            = train_tt.Station[idx_end],
-                ArrivalToStation     = train_tt.Arrival[idx_end],
+                ArrivalToStation     = time_string_to_minutes(train_tt.Arrival[idx_end]),
                 Demand               = leg_demand,
                 Distance_KM          = round(total_distance, digits = 1),
                 Electrified          = is_fully_electrified
@@ -422,7 +422,7 @@ function build_connections(df_timetable; save_to_csv::Bool = false, filename::St
         first_departure = first_row.DepartureFromStation
         
         # Check if first station is in results
-        if !any(row -> row.TrainId == train_id && row.ConnectionStation == first_from, eachrow(result))
+        if !any(row -> row.TrainId == train_id && row.ConnectionStation == first_from, eachrow(result)) && first_from != "Start"
             push!(result, (
                 TrainId = train_id,
                 FromStation = "Start",
@@ -439,7 +439,7 @@ function build_connections(df_timetable; save_to_csv::Bool = false, filename::St
         last_arrival = last_row.ArrivalToStation
         
         # Check if last station is in results
-        if !any(row -> row.TrainId == train_id && row.ConnectionStation == last_to, eachrow(result))
+        if !any(row -> row.TrainId == train_id && row.ConnectionStation == last_to, eachrow(result)) && last_to != "End"
             push!(result, (
                 TrainId = train_id,
                 FromStation = train_data[end, :FromStation],
@@ -562,6 +562,27 @@ function add_24h_offset(time_str::String)
     # Use existing seconds if available, otherwise "00"
     s = length(parts) >= 3 ? parse(Int, parts[3]) : 0
     return @sprintf("%02d:%02d:%02d", h, m, s)
+end
+
+
+"""
+Convert a time string to total minutes
+
+# Arguments
+- `time_str::String`: Time in `"HH:MM"` or `"HH:MM:SS"` format.  
+  If empty, returns `0`.
+
+# Returns
+- `Int`: Total number of minutes (`HH * 60 + MM`).
+"""
+function time_string_to_minutes(time_str::String)
+    if isempty(time_str)
+        return 0
+    end
+    parts = split(time_str, ":")
+    h = parse(Int, parts[1])
+    m = parse(Int, parts[2])
+    return h * 60 + m
 end
 
 
