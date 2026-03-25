@@ -413,13 +413,13 @@ function build_connections(df_timetable; save_to_csv::Bool = false, filename::St
     )
 
     # 4. Handle unmatched start and end stations
-    # for train_id in unique(df_timetable.TrainId)
-    #     train_data = sort!(filter(row -> row.TrainId == train_id, df_timetable), :ArrivalToStation)
+    for train_id in unique(df_timetable.TrainId)
+        train_data = sort!(filter(row -> row.TrainId == train_id, df_timetable), :ArrivalToStation)
         
-    #     # Find first station (start of route)
-    #     first_row = train_data[1, :]
-    #     first_from = first_row.FromStation
-    #     first_departure = first_row.DepartureFromStation
+        # Find first station (start of route)
+        first_row = train_data[1, :]
+        first_from = first_row.FromStation
+        first_departure = first_row.DepartureFromStation
         
         # Check if first station is in results
         if !any(row -> row.TrainId == train_id && row.ConnectionStation == first_from, eachrow(result)) && first_from != "Start"
@@ -434,9 +434,9 @@ function build_connections(df_timetable; save_to_csv::Bool = false, filename::St
         end
         
     #     # Find last station (end of route)
-    #     last_row = train_data[end, :]
-    #     last_to = last_row.ToStation
-    #     last_arrival = last_row.ArrivalToStation
+        last_row = train_data[end, :]
+        last_to = last_row.ToStation
+        last_arrival = last_row.ArrivalToStation
         
         # Check if last station is in results
         if !any(row -> row.TrainId == train_id && row.ConnectionStation == last_to, eachrow(result)) && last_to != "End"

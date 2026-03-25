@@ -2,7 +2,7 @@ using CSV, XLSX
 include("DataManipulation_functions.jl")
 
 # add (empty) trips for start and end stations
-add_terminal_trips = false
+add_terminal_trips = true
 
 # construct file paths to XML/XLSX files
 parent_dir = dirname(dirname(@__FILE__))

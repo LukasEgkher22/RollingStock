@@ -113,7 +113,7 @@ timetable_data.Index = 1:n_trips
 # -----------------------------------------------------------
 model = Model(Gurobi.Optimizer)
 
-# --- 1. Variables ---
+# ----------- 1. Variables -----------
 
 # y[c, j] = 1 if trip j is served by composition c
 @variable(model, y[c=1:C, j=1:n_trips], Bin)
@@ -131,8 +131,8 @@ model = Model(Gurobi.Optimizer)
 # s_start[m, s] number of train units of type m starting at station s
 @variable(model, s_start[m=1:M, s=1:S] >= 0)
 
-# Objective: Minimize total cost (km_costs * distance)
-# TODO: add an estimate for unit costs
+# ----------- Objective -----------
+# Minimize total cost (km_costs * distance)
 @objective(model, Min, sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:n_trips) # distance costs for each composition used
     + sum(v1[m, n] * coupling_penalty for m in 1:M, n in 1:N)   # make coupling/decoupling less attractive
     + sum(v2[m, n] * decoupling_penalty for m in 1:M, n in 1:N)
@@ -148,14 +148,11 @@ for j in 1:n_trips
     end
 end
 
-# # C. Global Station Balance (Type-based overnight requirement)
-# # "The number of units of type m starting at s must equal the number ending at s"
-# # for m in 1:M, s in stations
-# #     @constraint(model, 
-# #         sum(s_start[m, n, s] for n in 1:N[m]) == 
-# #         sum(s_end[m, n, s] for n in 1:N[m])
-# #     )
-# # end
+# C. Global Station Balance (Type-based overnight requirement)
+# "The number of units of type m starting at s must equal the number ending at s"
+# for m in 1:M, s in 1:S
+#     @constraint(model, s_start[m, s] == storage[m, s, T])
+# end
 
 # Demand Coverage
 for j in 1:n_trips
@@ -241,8 +238,8 @@ if termination_status(model) == OPTIMAL
         TrainId = Int[],
         FromStation = String[],
         ToStation = String[],
-        Departure = String[],
-        Arrival = String[],
+        Departure = Int[],
+        Arrival = Int[],
         Demand = Int[],
         Composition = String[]
     )
@@ -260,12 +257,6 @@ if termination_status(model) == OPTIMAL
                 Demand = timetable_data.Demand[j],
                 Composition = string(compositions[c])
             ))
-            # println("Trip $j (", timetable_data.FromStation[j], " -> ", timetable_data.ToStation[j], 
-            #         ", Depart: ", timetable_data.DepartureFromStation[j], 
-            #         ", Arrive: ", timetable_data.ArrivalToStation[j], 
-            #         ", TrainId: ", timetable_data.TrainId[j], 
-            #         ", Demand: ", timetable_data.Demand[j], 
-            #         ") is served by Composition $c (", compositions[c], ")")
         end
     end
 
@@ -316,14 +307,30 @@ if termination_status(model) == OPTIMAL
 
     println("\n--- STORAGE OVER TIME ---")
     for m in 1:M
+        storage_df = DataFrame(
+            Type = String[],
+            Station = String[],
+            Time = Int[],
+            Units = Int[]
+        )
+        
         for s in 1:S
-            storage_times = [(time[t], value(storage[m, s, t])) for t in 1:T if value(storage[m, s, t]) > 0.5]
-            if !isempty(storage_times)
-                println("Type: $(RS_Data.Name[m]), Station: $(stations[s])")
-                for (t, storage_val) in storage_times
-                    println("  Time: $t, Units: $(round(Int, storage_val))")
+            for t in 1:T
+                storage_val = value(storage[m, s, t])
+                if storage_val > 0.5
+                    push!(storage_df, (
+                    Type = RS_Data.Name[m],
+                    Station = stations[s],
+                    Time = time[t],
+                    Units = round(Int, storage_val)
+                    ))
                 end
             end
+        end
+        
+        if !isempty(storage_df)
+            storage_df = sort(storage_df, [:Station, :Time])
+            CSV.write(joinpath(project_root, "results_storage.csv"), storage_df)
         end
     end
     
