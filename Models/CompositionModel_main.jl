@@ -47,16 +47,23 @@ compositions = DataFrame(XLSX.gettable(excel_file["Composition groups"], header=
 # Access columns from rolling_stock_data
 # RS_Data[!, ["Name", "Seats", "Kilometer costs", "Unit cost", "Availability", "Electrified"]]
 
-# add a "empty" composition to represent the special composition for trips starting at "Start" or ending at "End"
+# add an "empty" composition to represent the special composition for trips starting at "Start" or ending at "End"
 push!(compositions, "empty")
-RS_Data.Name = push!(RS_Data.Name, "empty")
-RS_Data[!, "Kilometer costs"] = push!(RS_Data[!, "Kilometer costs"], 0)
-RS_Data[!, "Seats"] = push!(RS_Data[!, "Seats"], 0)
-RS_Data[!, "Unit cost"] = push!(RS_Data[!, "Unit cost"], 0)
-RS_Data[!, "Availability"] = push!(RS_Data[!, "Availability"], 10000)
+push!(RS_Data, (
+    Name = "empty",
+    Description = "empty",
+    Carriages = 0,
+    Length = 0,
+    Seats = 0,
+    var"Kilometer costs" = 0,
+    var"Unit cost" = 0,
+    Availability = 10000,
+    Electrified = 1
+))
 
 # Get unique stations from timetable
 stations = unique(timetable_data.FromStation ∪ timetable_data.ToStation)
+station_to_idx = Dict(name => i for (i, name) in enumerate(stations))
 
 # define number of types and units
 M = nrow(RS_Data)
@@ -73,6 +80,8 @@ comp_number, coupled_dict, decoupled_dict = get_coupling_matrices(compositions, 
 # Get composition costs per kilometer [1:C]
 comp_costs, comp_seats = get_composition_details(compositions, RS_Data[!, ["Kilometer costs", "Seats"]], comp_number)
 
+# define indices of compositions that contain electrified units -> they are not allowed for trips that require non-electrified rolling stock
+electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (comp_number[c][m] > 0) for m in 1:M)]
 
 # check comp_number
 # for c in 1:C
@@ -126,7 +135,7 @@ model = Model(Gurobi.Optimizer)
 @variable(model, v2[m=1:M, n=1:N] >= 0)
 
 # storage[m, n, t] - non-negative number of units of type m stored at station s at time t
-@variable(model, storage[m=1:M, s=1:S, t=1:T] >= 0)
+@variable(model, storage[m=1:M, n=1:N] >= 0)
 
 # s_start[m, s] number of train units of type m starting at station s
 @variable(model, s_start[m=1:M, s=1:S] >= 0)
@@ -145,6 +154,15 @@ for j in 1:n_trips
         fix(y[36, j], 1; force=true)
     else
         fix(y[36, j], 0; force=true)
+    end
+end
+
+# Fix compositions for trips that do not allow electrified rolling stock
+for j in 1:n_trips
+    if timetable_data.Electrified[j] == false
+        for c in electrified_comps
+            fix(y[c, j], 0; force=true)
+        end
     end
 end
 
@@ -170,21 +188,31 @@ for j in 1:n_trips
     # connections n where trip j is the first trip (FromStation) in the connection
     connections_first = [n for n in 1:N if connections[n, "FromStation"] == timetable_data.FromStation[j] && connections[n, "TrainId"] == timetable_data.TrainId[j]]
 
-    if length(connections_first) >= 1
-        # println("Trip $j has ", length(connections_first), " connections where it is the first trip. Connections: ", connections_first)
+    if length(connections_first) == 1
         for c in 1:C
             @constraint(model, sum(x[c, c2, n] for c2 in 1:C, n in connections_first) == y[c, j])
         end
+    elseif length(connections_first) == 0
+        if timetable_data.ToStation[j] != "End"
+            println("Warning: Trip $j has no connections where it is the first trip.") 
+        end
+    else length(connections_first) > 1
+        println("Warning: Trip $j has ", length(connections_first), " connections where it is the first trip. Connections: ", connections_first)
     end
 
     # connections n where trip j is the second trip (ToStation) in the connection
     connections_second = [n for n in 1:N if connections[n, "ToStation"] == timetable_data.ToStation[j] && connections[n, "TrainId"] == timetable_data.TrainId[j]]
 
-    if length(connections_second) >= 1
-        # println("Trip $j has ", length(connections_second), " connections where it is the second trip. Connections: ", connections_second)
+    if length(connections_second) == 1
         for c in 1:C
             @constraint(model, sum(x[c1, c, n] for c1 in 1:C, n in connections_second) == y[c, j])
         end
+    elseif length(connections_second) == 0
+        if timetable_data.FromStation[j] != "Start"
+            println("Warning: Trip $j has no connections where it is the second trip.") 
+        end
+    else length(connections_second) > 1
+        println("Warning: Trip $j has ", length(connections_second), " connections where it is the second trip. Connections: ", connections_second)
     end
 end
 
@@ -195,32 +223,22 @@ for m in 1:M, n in 1:N
 end
 
 # define storage variable
-for m in 1:M, s in 1:S, t in 1:T
-    earlier_connections = [n for n in 1:N if (connections[n, "DepartureFromConnection"] <= time[t]) && (connections[n, "ConnectionStation"] == stations[s])]
-    @constraint(model, storage[m, s, t] == s_start[m, s] + sum(v2[m, n] - v1[m, n] for n in earlier_connections))
+# for m in 1:M, s in 1:S, t in 1:T
+#     earlier_connections = [n for n in 1:N if (connections[n, "DepartureFromConnection"] <= time[t]) && (connections[n, "ConnectionStation"] == stations[s])]
+#     @constraint(model, storage[m, s, t] == s_start[m, s] + sum(v2[m, n] - v1[m, n] for n in earlier_connections))
+# end
+
+for n in 1:N
+    earlier_connections = [n2 for n2 in 1:N if (connections[n2, "ArrivalAtConnection"] <= connections[n, "DepartureFromConnection"]) && (connections[n2, "ConnectionStation"] == connections[n, "ConnectionStation"])]
+    for m in 1:M
+        @constraint(model, storage[m, n] == s_start[m, station_to_idx[connections[n, "ConnectionStation"]]] + sum(v2[m, n2] - v1[m, n2] for n2 in earlier_connections))
+    end
 end
 
-# for each trip j, if composition c is assigned, then the required units must be available at the departure station at the departure time
-# for j in 1:n_trips, c in 1:C
-#     departure_time = timetable_data.DepartureFromStation[j]
-#     departure_station = timetable_data.FromStation[j]
-#     required_units = comp_number[c]
-    
-#     # Find the time index for the departure time
-#     t_idx = findfirst(==(departure_time), time)
-#     s_idx = findfirst(==(departure_station), stations)
-    
-#     if t_idx !== nothing && s_idx !== nothing
-#         for m in 1:M
-#             @constraint(model, storage[m, s_idx, t_idx] >= required_units[m] * y[c, j])
-#         end
-#     end
-# end
-
 # model capacity constraint per type over s_start variable
-# for m in 1:M
-#     @constraint(model, sum(s_start[m, s] for s in 1:S) <= RS_Data.Availability[m])
-# end
+for m in 1:M
+    @constraint(model, sum(s_start[m, s] for s in 1:S) <= RS_Data.Availability[m])
+end
 
 # Solve the model
 optimize!(model)
@@ -306,32 +324,56 @@ if termination_status(model) == OPTIMAL
     end
 
     println("\n--- STORAGE OVER TIME ---")
-    for m in 1:M
-        storage_df = DataFrame(
-            Type = String[],
-            Station = String[],
-            Time = Int[],
-            Units = Int[]
-        )
+    # for m in 1:M
+    #     storage_df = DataFrame(
+    #         Type = String[],
+    #         Station = String[],
+    #         Time = Int[],
+    #         Units = Int[]
+    #     )
         
-        for s in 1:S
-            for t in 1:T
-                storage_val = value(storage[m, s, t])
-                if storage_val > 0.5
-                    push!(storage_df, (
-                    Type = RS_Data.Name[m],
-                    Station = stations[s],
-                    Time = time[t],
-                    Units = round(Int, storage_val)
-                    ))
-                end
-            end
-        end
+    #     for s in 1:S
+    #         for t in 1:T
+    #             storage_val = value(storage[m, s, t])
+    #             if storage_val > 0.5
+    #                 push!(storage_df, (
+    #                 Type = RS_Data.Name[m],
+    #                 Station = stations[s],
+    #                 Time = time[t],
+    #                 Units = round(Int, storage_val)
+    #                 ))
+    #             end
+    #         end
+    #     end
         
-        if !isempty(storage_df)
-            storage_df = sort(storage_df, [:Station, :Time])
-            CSV.write(joinpath(project_root, "results_storage.csv"), storage_df)
+    #     if !isempty(storage_df)
+    #         storage_df = sort(storage_df, [:Station, :Time])
+    #         CSV.write(joinpath(project_root, "results_storage.csv"), storage_df)
+    #     end
+    # end
+    storage_df = DataFrame(
+        Type = String[],
+        Connection = Int[],
+        Station = String[],
+        Departure = Any[],
+        Units = Int[]
+    )
+    for m in 1:M, n in 1:N
+        storage_val = value(storage[m, n])
+        if storage_val > 0.5
+            push!(storage_df, (
+                Type = RS_Data.Name[m],
+                Connection = n,
+                Station = connections[n, "ConnectionStation"],
+                Departure = connections[n, "DepartureFromConnection"],
+                Units = round(Int, storage_val)
+            ))
         end
+    end
+
+    if !isempty(storage_df)
+        storage_df = sort(storage_df, [:Station, :Departure])
+        CSV.write(joinpath(project_root, "results_storage.csv"), storage_df)
     end
     
 else
