@@ -3,6 +3,7 @@ using DataFrames
 using JuMP
 using Gurobi
 using XLSX
+import Dates
 
 
 project_root = dirname(@__DIR__)
@@ -12,7 +13,7 @@ include(joinpath(project_root, "Models", "CompositionModel_functions.jl"))
 
 # parameters
 use_smaller_dataset = false
-filter_on_trainId = true
+filter_on_trainId = false
 
 # Read merged data from CSV
 timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "merged_data_with_terminals.csv"), DataFrame)
@@ -26,7 +27,7 @@ if use_smaller_dataset
 end
 
 if filter_on_trainId
-    selected_trainIds = [1199, 181, 100] # example train IDs to keep
+    selected_trainIds = [1199, 181, 100, 10, 101] # example train IDs to keep
     timetable_data = filter(row -> row.TrainId in selected_trainIds, timetable_data)
     connections = filter(row -> row.TrainId in selected_trainIds, connections)
     println("Filtered timetable to ", nrow(timetable_data), " trips with TrainIds in ", selected_trainIds, ".\n")
@@ -121,6 +122,7 @@ timetable_data.Index = 1:n_trips
 # CREATE MODEL
 # -----------------------------------------------------------
 model = Model(Gurobi.Optimizer)
+set_silent(model)
 
 # ----------- 1. Variables -----------
 
@@ -223,11 +225,6 @@ for m in 1:M, n in 1:N
 end
 
 # define storage variable
-# for m in 1:M, s in 1:S, t in 1:T
-#     earlier_connections = [n for n in 1:N if (connections[n, "DepartureFromConnection"] <= time[t]) && (connections[n, "ConnectionStation"] == stations[s])]
-#     @constraint(model, storage[m, s, t] == s_start[m, s] + sum(v2[m, n] - v1[m, n] for n in earlier_connections))
-# end
-
 for n in 1:N
     earlier_connections = [n2 for n2 in 1:N if (connections[n2, "ArrivalAtConnection"] <= connections[n, "DepartureFromConnection"]) && (connections[n2, "ConnectionStation"] == connections[n, "ConnectionStation"])]
     for m in 1:M
@@ -241,7 +238,22 @@ for m in 1:M
 end
 
 # Solve the model
+start_time = Base.time()
+done = Ref(false)
+
+runtime_task = @async begin
+    while !done[]
+        println("Elapsed runtime: ", round(Base.time() - start_time, digits=1), " s")
+        sleep(10.0)
+    end
+end
+
 optimize!(model)
+done[] = true
+wait(runtime_task)
+
+total_runtime = Base.time() - start_time
+println("Solver finished with status $(termination_status(model)) after ", round(total_runtime, digits=2), " s")
 
 # Print results
 println("\n--- OPTIMIZATION RESULTS ---")
@@ -323,39 +335,12 @@ if termination_status(model) == OPTIMAL
         end
     end
 
-    println("\n--- STORAGE OVER TIME ---")
-    # for m in 1:M
-    #     storage_df = DataFrame(
-    #         Type = String[],
-    #         Station = String[],
-    #         Time = Int[],
-    #         Units = Int[]
-    #     )
-        
-    #     for s in 1:S
-    #         for t in 1:T
-    #             storage_val = value(storage[m, s, t])
-    #             if storage_val > 0.5
-    #                 push!(storage_df, (
-    #                 Type = RS_Data.Name[m],
-    #                 Station = stations[s],
-    #                 Time = time[t],
-    #                 Units = round(Int, storage_val)
-    #                 ))
-    #             end
-    #         end
-    #     end
-        
-    #     if !isempty(storage_df)
-    #         storage_df = sort(storage_df, [:Station, :Time])
-    #         CSV.write(joinpath(project_root, "results_storage.csv"), storage_df)
-    #     end
-    # end
+    # STORAGE OUTPUT
     storage_df = DataFrame(
         Type = String[],
         Connection = Int[],
         Station = String[],
-        Departure = Any[],
+        Arrival = Any[],
         Units = Int[]
     )
     for m in 1:M, n in 1:N
@@ -365,14 +350,14 @@ if termination_status(model) == OPTIMAL
                 Type = RS_Data.Name[m],
                 Connection = n,
                 Station = connections[n, "ConnectionStation"],
-                Departure = connections[n, "DepartureFromConnection"],
+                Arrival = connections[n, "ArrivalAtConnection"],
                 Units = round(Int, storage_val)
             ))
         end
     end
 
     if !isempty(storage_df)
-        storage_df = sort(storage_df, [:Station, :Departure])
+        storage_df = sort(storage_df, [:Station, :Arrival])
         CSV.write(joinpath(project_root, "results_storage.csv"), storage_df)
     end
     
