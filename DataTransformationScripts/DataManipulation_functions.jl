@@ -707,7 +707,7 @@ function aggregate_train_trips(
         
         # Determine the TrainSystem for this TrainId based on ranges
         # Logic: Find row where From_number <= tid <= To_number
-        system_match = filter(r -> r."From number" <= Int(tid) <= r."To number", mapping_df)
+        system_match = filter(r -> r."From number" <= Int(tid) <= r."To number" && r."Category" == group[1, "TrainCategory"], mapping_df) # add category filter
         
         # Get allowed cut stations for this specific train's system
         allowed_cutstations = Set{String}()
