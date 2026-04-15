@@ -1,6 +1,8 @@
 using EzXML
 using DataFrames
 using Printf
+using CSV
+using XLSX
 
 
 """
@@ -673,3 +675,96 @@ function add_terminal_rows(df::DataFrame; save_to_csv::Bool = false, filename::S
     
     return new_df
 end
+
+"""
+Aggregates train trips based on TrainId and specific cut stations defined in an Excel config.
+"""
+function aggregate_train_trips(
+    merged_data::DataFrame, 
+    config_path::String; 
+    save_to_csv::Bool = false, 
+    filename::String = "merged_data_combined.csv"
+)
+    # 1. Load Excel configuration sheets
+    xf = XLSX.readxlsx(config_path)
+    
+    # Sheet: "Trip cutpoints" (TrainSystem, Cut Station)
+    cutpoints_df = DataFrame(XLSX.gettable(xf["Trip cutpoints"]))
+    
+    # Sheet: "Train system mapping" (System name, Category, From number, To number)
+    mapping_df = DataFrame(XLSX.gettable(xf["Train system mapping"]))
+    mapping_df[!, "From number"] = [isnothing(x) ? 0 : Int(x) for x in mapping_df[!, "From number"]]
+    mapping_df[!, "To number"]   = [isnothing(x) ? 0 : Int(x) for x in mapping_df[!, "To number"]]
+    
+    # 2. Sort data to ensure chronological order
+    df = copy(merged_data)
+    df[!, :TrainId] = [isnothing(x) ? 0 : parse(Int, x) for x in df[!, :TrainId]]
+    df = sort(df, [:TrainId, :DepartureFromStation])
+    
+    combined_rows = []
+    
+    # 3. Group by TrainId to process each train's route
+    gdf = groupby(df, :TrainId)
+    
+    for group in gdf
+        tid = group[1, :TrainId]
+        
+        # Determine the TrainSystem for this TrainId based on ranges
+        # Logic: Find row where From_number <= tid <= To_number
+        system_match = filter(r -> r."From number" <= Int(tid) <= r."To number" && r."Category" == group[1, "TrainCategory"], mapping_df) # add category filter
+        
+        # Get allowed cut stations for this specific train's system
+        allowed_cutstations = Set{String}()
+        if !isempty(system_match)
+            system_name = system_match[1, "System name"]
+            # Filter cutpoints for this system
+            system_cuts = filter(r -> r.TrainSystem == system_name, cutpoints_df)
+            union!(allowed_cutstations, system_cuts."Cut station")
+        end
+
+        # Temporary storage for the current route segment
+        current_segment = DataFrame()
+        
+        for i in 1:nrow(group)
+            push!(current_segment, group[i, :])
+            
+            # Define Split Condition:
+            # - Current ToStation is a valid cut station for this train system
+            # - OR it is the last trip of this TrainId
+            is_cut_station = group[i, :ToStation] in allowed_cutstations
+            is_last_trip = (i == nrow(group))
+            
+            if is_cut_station || is_last_trip
+                
+                # Aggregate the collected segment into one row
+                push!(combined_rows, (
+                    TrainCategory = current_segment[1, :TrainCategory],
+                    TrainId = tid,
+                    FromStation = current_segment[1, :FromStation],
+                    DepartureFromStation = current_segment[1, :DepartureFromStation],
+                    ToStation = current_segment[end, :ToStation],
+                    ArrivalToStation = current_segment[end, :ArrivalToStation],
+                    Demand = maximum(current_segment.Demand),
+                    Distance_KM = round(sum(current_segment.Distance_KM), digits = 1),
+                    Electrified = all(current_segment.Electrified) # Only true if ALL are true
+                ))
+                
+                # Clear segment to start a new one (next station becomes new Departure)
+                current_segment = DataFrame()
+            end
+        end
+    end
+    
+    result_df = DataFrame(combined_rows)
+    
+    # 4. Optional: Save to CSV
+    if save_to_csv
+        full_filename = endswith(filename, ".csv") ? filename : filename * ".csv"
+        CSV.write(full_filename, result_df)
+        println("File saved to: $full_filename")
+    end
+    
+    return result_df
+end
+
+
