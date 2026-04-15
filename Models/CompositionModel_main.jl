@@ -16,7 +16,7 @@ use_smaller_dataset = false
 filter_on_trainId = false
 
 # Read merged data from CSV
-timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "merged_data_with_terminals.csv"), DataFrame)
+timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "aggregated_trips_with_terminals.csv"), DataFrame)
 connections = build_connections(timetable_data)
 
 if use_smaller_dataset
@@ -34,7 +34,7 @@ if filter_on_trainId
 end
 
 
-CSV.write(joinpath(project_root, "timetableForTest.csv"), timetable_data)
+# CSV.write(joinpath(project_root, "timetableForTest.csv"), timetable_data)
 
 # timetable_data = timetable_data[1:50, :]
 # println("Reduced timetable again to ", nrow(timetable_data), " trips.\n")
@@ -42,8 +42,18 @@ CSV.write(joinpath(project_root, "timetableForTest.csv"), timetable_data)
 # Read specific sheets from Excel file
 excel_file = XLSX.readxlsx(joinpath(project_root, "Data", "Base Day TUE.xlsx"))
 RS_Data = DataFrame(XLSX.gettable(excel_file["Rolling Stock"]))
-night_capacity = DataFrame(XLSX.gettable(excel_file["Night capacity"]))
 compositions = DataFrame(XLSX.gettable(excel_file["Composition groups"], header=false))[!, 1]
+night_capacity = DataFrame(XLSX.gettable(excel_file["Night capacity"]))
+night_capacity_dict = Dict(
+    (row.Station, row."Rolling stock types") => (row."Start Limit (count)", row."End Limit (count)") 
+    for row in eachrow(night_capacity)
+)
+reallocations = DataFrame(XLSX.gettable(excel_file["Reallocation"]))
+reallocation_dict = Dict(
+    (row.Station, row."Rolling Stock type") => (row."Reallocation coupling", row."Reallocation uncoupling") 
+    for row in eachrow(reallocations)
+)
+reallocation_default = [0, 60] # default reallocation times (coupling, uncoupling) if not specified for a station and type
 
 # Access columns from rolling_stock_data
 # RS_Data[!, ["Name", "Seats", "Kilometer costs", "Unit cost", "Availability", "Electrified"]]
@@ -114,6 +124,8 @@ electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (com
 # define penalty parameters for coupling and decoupling (example: 100 per unit)
 coupling_penalty = 10
 decoupling_penalty = 10
+end_of_day_penalty = 100000
+extra_unit_penalty = 100000
 
 timetable_data.Index = 1:n_trips
 # print(timetable_data)
@@ -122,7 +134,7 @@ timetable_data.Index = 1:n_trips
 # CREATE MODEL
 # -----------------------------------------------------------
 model = Model(Gurobi.Optimizer)
-set_silent(model)
+# set_silent(model)
 
 # ----------- 1. Variables -----------
 
@@ -139,18 +151,25 @@ set_silent(model)
 # storage[m, n, t] - non-negative number of units of type m stored at station s at time t
 @variable(model, storage[m=1:M, n=1:N] >= 0)
 
-# s_start[m, s] number of train units of type m starting at station s
-@variable(model, s_start[m=1:M, s=1:S] >= 0)
+# less[m, s] - number of units of type m that are less at station s at the end of the day than at the start (overnight requirement)
+@variable(model, balance_shortage[m=1:M, s=1:S] >= 0)
+# extra[m, s] - number of units of type m that are extra at station s at the end of the day than at the start (overnight requirement)
+@variable(model, balance_excess[m=1:M, s=1:S] >= 0)
+
+# extra_units[m, s] - number of units of type m that additionally start at station s on top of night capacity
+@variable(model, extra_units[m=1:M, s=1:S] >= 0)
 
 # ----------- Objective -----------
 # Minimize total cost (km_costs * distance)
 @objective(model, Min, sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:n_trips) # distance costs for each composition used
-    + sum(v1[m, n] * coupling_penalty for m in 1:M, n in 1:N)   # make coupling/decoupling less attractive
+    + sum(v1[m, n] * coupling_penalty for m in 1:M, n in 1:N) # make coupling/decoupling less attractive
     + sum(v2[m, n] * decoupling_penalty for m in 1:M, n in 1:N)
-    + sum(sum(s_start[m, s] for s in 1:S) * RS_Data[!, "Unit cost"][m] for m in 1:M) # unit cost for each unit that starts
+    + sum(balance_shortage[m, s] * end_of_day_penalty for m in 1:M, s in 1:S)
+    + sum(balance_excess[m, s] * end_of_day_penalty for m in 1:M, s in 1:S)
+    + sum(extra_units[m, s] * extra_unit_penalty for m in 1:M, s in 1:S)
 )
 
-# Fix composition 36 (start_end) for trips starting at "Start" or ending at "End"
+# Fix composition 36 (empty) for trips starting at "Start" or ending at "End"
 for j in 1:n_trips
     if timetable_data.FromStation[j] == "Start" || timetable_data.ToStation[j] == "End"
         fix(y[36, j], 1; force=true)
@@ -169,10 +188,9 @@ for j in 1:n_trips
 end
 
 # C. Global Station Balance (Type-based overnight requirement)
-# "The number of units of type m starting at s must equal the number ending at s"
-# for m in 1:M, s in 1:S
-#     @constraint(model, s_start[m, s] == storage[m, s, T])
-# end
+for m in 1:M, s in 1:S  # coupled + excess == decoupled + shortage
+    @constraint(model, sum(v1[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_excess[m, s] == sum(v2[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_shortage[m, s])
+end
 
 # Demand Coverage
 for j in 1:n_trips
@@ -184,7 +202,7 @@ for j in 1:n_trips
     @constraint(model, sum(y[c, j] for c in 1:C) == 1)
 end
 
-# If composition c is used for trip j, then the connection variable x must be set to 1 for the corresponding connection
+# If composition c is used for trip j, then the connection variable x must be set to 1 for exactly one of the corresponding connections
 for j in 1:n_trips
 
     # connections n where trip j is the first trip (FromStation) in the connection
@@ -224,17 +242,24 @@ for m in 1:M, n in 1:N
     @constraint(model, v2[m, n] == sum(decoupled_dict[(m, c1, c2)] * x[c1, c2, n] for c1 in 1:C, c2 in 1:C))
 end
 
-# define storage variable
+# define storage variable (allow extra units, if necessary)
 for n in 1:N
-    earlier_connections = [n2 for n2 in 1:N if (connections[n2, "ArrivalAtConnection"] <= connections[n, "DepartureFromConnection"]) && (connections[n2, "ConnectionStation"] == connections[n, "ConnectionStation"])]
     for m in 1:M
-        @constraint(model, storage[m, n] == s_start[m, station_to_idx[connections[n, "ConnectionStation"]]] + sum(v2[m, n2] - v1[m, n2] for n2 in earlier_connections))
+        earlier_connections_coupled = [n2 for n2 in 1:N if 
+            (connections[n2, "ArrivalAtConnection"] + get(reallocation_dict, (connections[n2, "ConnectionStation"], RS_Data.Name[m])[1], get(reallocation_dict, (connections[n2, "ConnectionStation"], "*")[1], reallocation_default[1])) <= connections[n, "DepartureFromConnection"]) 
+            && (connections[n2, "ConnectionStation"] == connections[n, "ConnectionStation"])
+        ]
+        earlier_connections_decoupled = [n2 for n2 in 1:N if 
+            (connections[n2, "ArrivalAtConnection"] + get(reallocation_dict, (connections[n2, "ConnectionStation"], RS_Data.Name[m])[2], get(reallocation_dict, (connections[n2, "ConnectionStation"], "*")[2], reallocation_default[2])) <= connections[n, "DepartureFromConnection"]) 
+            && (connections[n2, "ConnectionStation"] == connections[n, "ConnectionStation"])
+        ]
+        @constraint(model, 
+            storage[m, n] == extra_units[m, station_to_idx[connections[n, "ConnectionStation"]]] 
+            + get(night_capacity_dict, (connections[n, "ConnectionStation"], RS_Data.Name[m]), (0, 0))[1] 
+            - sum(v1[m, n2] for n2 in earlier_connections_coupled)
+            + sum(v2[m, n2] for n2 in earlier_connections_decoupled)
+        )
     end
-end
-
-# model capacity constraint per type over s_start variable
-for m in 1:M
-    @constraint(model, sum(s_start[m, s] for s in 1:S) <= RS_Data.Availability[m])
 end
 
 # Solve the model
@@ -276,7 +301,7 @@ if termination_status(model) == OPTIMAL
 
     for j in 1:n_trips
         assigned_comps = [c for c in 1:C if value(y[c, j]) > 0.5]
-        for c in assigned_comps
+        for c in assigned_comps if c != 36 # skip "empty" composition in output
             push!(assignments, (
                 TripId = j,
                 TrainId = timetable_data.TrainId[j],
@@ -299,66 +324,108 @@ if termination_status(model) == OPTIMAL
     end
     CSV.write(joinpath(project_root, "results_composition_assignments.csv"), ordered_assignments)
 
-    println("\n--- STARTING TRAINS AT STATIONS ---")
-    for m in 1:M
-        for s in 1:S
-            n_start = value(s_start[m, s])
-            if n_start > 0.5
-                println("Type: ", RS_Data.Name[m], " starts ", round(n_start), " trains at station ", stations[s])
-            end
-        end
-    end
+    # println("\n--- STARTING TRAINS AT STATIONS ---")
+    # for m in 1:M
+    #     for s in 1:S
+    #         n_start = value(s_start[m, s])
+    #         if n_start > 0.5
+    #             println("Type: ", RS_Data.Name[m], " starts ", round(n_start), " trains at station ", stations[s])
+    #         end
+    #     end
+    # end
 
-    println("\n--- COMPOSITION TRANSITIONS ---")
-    for n in 1:N
-        station = connections[n, "ConnectionStation"]
-        departure_time = connections[n, "DepartureFromConnection"]
+    # println("\n--- COMPOSITION TRANSITIONS ---")
+    # for n in 1:N
+    #     station = connections[n, "ConnectionStation"]
+    #     departure_time = connections[n, "DepartureFromConnection"]
         
-        assigned_comps = [(c1, c2) for c1 in 1:C, c2 in 1:C if value(x[c1, c2, n]) > 0.5]
+    #     assigned_comps = [(c1, c2) for c1 in 1:C, c2 in 1:C if value(x[c1, c2, n]) > 0.5]
         
-        for (c1, c2) in assigned_comps
-            for m in 1:M
-                decoupled = value(v2[m, n])
-                coupled = value(v1[m, n])
-                if decoupled > 0.5 || coupled > 0.5
-                    println("\nStation: $station, Departure: $departure_time")
-                    println("  Composition before: $(compositions[c1])")
-                    println("  Composition after: $(compositions[c2])")
-                    if decoupled > 0.5
-                        println("    Decoupled: $(round(Int, decoupled)) × $(RS_Data.Name[m])")
-                    end
-                    if coupled > 0.5
-                        println("    Coupled: $(round(Int, coupled)) × $(RS_Data.Name[m])")
-                    end
-                end
-            end
-        end
-    end
+    #     for (c1, c2) in assigned_comps
+    #         for m in 1:M
+    #             decoupled = value(v2[m, n])
+    #             coupled = value(v1[m, n])
+    #             if decoupled > 0.5 || coupled > 0.5
+    #                 println("\nStation: $station, Departure: $departure_time")
+    #                 println("  Composition before: $(compositions[c1])")
+    #                 println("  Composition after: $(compositions[c2])")
+    #                 if decoupled > 0.5
+    #                     println("    Decoupled: $(round(Int, decoupled)) × $(RS_Data.Name[m])")
+    #                 end
+    #                 if coupled > 0.5
+    #                     println("    Coupled: $(round(Int, coupled)) × $(RS_Data.Name[m])")
+    #                 end
+    #             end
+    #         end
+    #     end
+    # end
 
     # STORAGE OUTPUT
-    storage_df = DataFrame(
-        Type = String[],
-        Connection = Int[],
+    # storage_df = DataFrame(
+    #     Type = String[],
+    #     Connection = Int[],
+    #     Station = String[],
+    #     Arrival = Any[],
+    #     Units = Int[]
+    # )
+    # for m in 1:M, n in 1:N
+    #     storage_val = value(storage[m, n])
+    #     if storage_val > 0.5
+    #         push!(storage_df, (
+    #             Type = RS_Data.Name[m],
+    #             Connection = n,
+    #             Station = connections[n, "ConnectionStation"],
+    #             Arrival = connections[n, "ArrivalAtConnection"],
+    #             Units = round(Int, storage_val)
+    #         ))
+    #     end
+    # end
+
+    # if !isempty(storage_df)
+    #     storage_df = sort(storage_df, [:Station, :Arrival])
+    #     CSV.write(joinpath(project_root, "results_storage.csv"), storage_df)
+    # end
+
+    balance_df = DataFrame(
+        Reason = String[],
         Station = String[],
-        Arrival = Any[],
-        Units = Int[]
+        Type = String[],
+        Count = Int[]
     )
-    for m in 1:M, n in 1:N
-        storage_val = value(storage[m, n])
-        if storage_val > 0.5
-            push!(storage_df, (
+
+    for m in 1:M, s in 1:S
+        shortage = value(balance_shortage[m, s])
+        excess = value(balance_excess[m, s])
+        extra = value(extra_units[m, s])
+        
+        if shortage > 0.5
+            push!(balance_df, (
+                Reason = "End-of-day shortage",
+                Station = stations[s],
                 Type = RS_Data.Name[m],
-                Connection = n,
-                Station = connections[n, "ConnectionStation"],
-                Arrival = connections[n, "ArrivalAtConnection"],
-                Units = round(Int, storage_val)
+                Count = round(Int, shortage)
+            ))
+        end
+        if excess > 0.5
+            push!(balance_df, (
+                Reason = "End-of-day excess",
+                Station = stations[s],
+                Type = RS_Data.Name[m],
+                Count = round(Int, excess)
+            ))
+        end
+        if extra > 0.5
+            push!(balance_df, (
+                Reason = "Extra units deployed",
+                Station = stations[s],
+                Type = RS_Data.Name[m],
+                Count = round(Int, extra)
             ))
         end
     end
 
-    if !isempty(storage_df)
-        storage_df = sort(storage_df, [:Station, :Arrival])
-        CSV.write(joinpath(project_root, "results_storage.csv"), storage_df)
+    if !isempty(balance_df)
+        CSV.write(joinpath(project_root, "results_balance.csv"), balance_df)
     end
     
 else
