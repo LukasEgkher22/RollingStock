@@ -42,7 +42,7 @@ end
 # Read specific sheets from Excel file
 excel_file = XLSX.readxlsx(joinpath(project_root, "Data", "Base Day TUE.xlsx"))
 RS_Data = DataFrame(XLSX.gettable(excel_file["Rolling Stock"]))
-compositions = DataFrame(XLSX.gettable(excel_file["Composition groups"], header=false))[!, 1]
+compositions_raw = DataFrame(XLSX.gettable(excel_file["Composition groups"], header=false))[!, 1]
 night_capacity = DataFrame(XLSX.gettable(excel_file["Night capacity"]))
 night_capacity_dict = Dict(
     (row.Station, row."Rolling stock types") => (row."Start Limit (count)", row."End Limit (count)") 
@@ -59,7 +59,7 @@ reallocation_default = [0, 60] # default reallocation times (coupling, uncouplin
 # RS_Data[!, ["Name", "Seats", "Kilometer costs", "Unit cost", "Availability", "Electrified"]]
 
 # add an "empty" composition to represent the special composition for trips starting at "Start" or ending at "End"
-push!(compositions, "empty")
+push!(compositions_raw, "empty")
 push!(RS_Data, (
     Name = "empty",
     Description = "empty",
@@ -78,27 +78,30 @@ station_to_idx = Dict(name => i for (i, name) in enumerate(stations))
 
 # define number of types and units
 M = nrow(RS_Data)
-C = length(compositions)
 n_trips = nrow(timetable_data)
 N = nrow(connections)
 S = length(stations)
 time = unique(vcat(timetable_data.DepartureFromStation, timetable_data.ArrivalToStation))
 T = length(time)
 
-# Get composition counts [1:C, 1:M], coupling and decoupling matrices [1:M, 1:C, 1:C]
-comp_number, coupled_dict, decoupled_dict = get_coupling_matrices(compositions, RS_Data.Name)
+
+compositions, comp_number = get_normalized_compositions(compositions_raw, RS_Data.Name)
+
+C = length(compositions)
+
+empty_comp_idx = findfirst(==( "empty"), compositions)
+
+# Get coupling and decoupling matrices [1:M, 1:C, 1:C]
+coupled_dict, decoupled_dict = get_coupling_matrices(comp_number, RS_Data.Name)
 
 # Get composition costs per kilometer [1:C]
 comp_costs, comp_seats = get_composition_details(compositions, RS_Data[!, ["Kilometer costs", "Seats"]], comp_number)
-
-# define indices of compositions that contain electrified units -> they are not allowed for trips that require non-electrified rolling stock
-electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (comp_number[c][m] > 0) for m in 1:M)]
 
 # check comp_number
 # for c in 1:C
 #     println("Composition ", c, ": ", compositions[c, 1])
 #     for m in 1:M 
-#         if comp_number[c][m] > 0 println(RS_Data.Name[m], ": ", comp_number[c][m], " units") end
+#         if comp_number[c, m] > 0 println(RS_Data.Name[m], ": ", comp_number[c, m], " units") end
 #     end
 # end
 
@@ -169,12 +172,12 @@ model = Model(Gurobi.Optimizer)
     + sum(extra_units[m, s] * extra_unit_penalty for m in 1:M, s in 1:S)
 )
 
-# Fix composition 36 (empty) for trips starting at "Start" or ending at "End"
+# Fix composition (empty) for trips starting at "Start" or ending at "End"
 for j in 1:n_trips
     if timetable_data.FromStation[j] == "Start" || timetable_data.ToStation[j] == "End"
-        fix(y[36, j], 1; force=true)
+        fix(y[empty_comp_idx, j], 1; force=true)
     else
-        fix(y[36, j], 0; force=true)
+        fix(y[empty_comp_idx, j], 0; force=true)
     end
 end
 

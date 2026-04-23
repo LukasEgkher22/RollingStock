@@ -56,45 +56,78 @@ function get_smaller_df(to_explore, bad_stations, timetable_data, connections)
     return new_timetable_data, new_connections
 end
 
-"""
-Calculates coupling and decoupling matrices for rolling stock compositions.
-
-This function analyzes the differences in unit composition between source and destination 
-compositions, determining which units need to be coupled (added) and which need to be 
-decoupled (removed) for each transition.
-
-# Arguments
-- `compositions::Vector`: A vector of composition identifiers, where each composition is 
-  represented as a dash-separated string of unit names (e.g., "ICA-ERF-ICA")
-- `unit_names::Vector`: A vector of unit names corresponding to the rolling stock types
-
-# Returns
-- `counts_per_comp::Dict`: A nested dictionary mapping (composition_index => (unit_index => count))
-  that stores the quantity of each unit type in each composition
-- `coupled::Dict{Tuple{Int, Int, Int}, Int}`: A dictionary with keys (unit, from_composition, to_composition)
-  storing the number of units to couple (add) during composition transitions
-- `decoupled::Dict{Tuple{Int, Int, Int}, Int}`: A dictionary with keys (unit, from_composition, to_composition)
-  storing the number of units to decouple (remove) during composition transitions
-"""
-function get_coupling_matrices(compositions, unit_names)
-    # 1. Pre-calculate the counts of each unit in each composition
-    # This creates a nested lookup: counts_per_comp["ICA-ERF"]["ICA"] = 1
-    counts_per_comp = Dict(
+function get_comp_counts(compositions, unit_names)
+  # This creates a nested lookup: counts_per_comp["ICA-ERF"]["ICA"] = 1
+    return Dict(
         ci => Dict(mi => (m == "empty" ? 0 : count(==(m), split(c, "-"))) for (mi, m) in enumerate(unit_names))
         for (ci, c) in enumerate(compositions)
     )
+end
+
+"""
+    get_normalized_compositions(compositions_raw, unit_names)
+
+Returns:
+1. `compositions`: A Vector of unique, normalized composition names (String).
+2. `counts_matrix`: A 2D Matrix{Int} where [c, m] is the count of unit type m in composition c.
+"""
+function get_normalized_compositions(compositions_raw, unit_names)
+    # 1. Use a Dictionary to store unique unit-count vectors as keys
+    # Map: Vector{Int} (unit counts) => String (Pretty Name)
+    unique_map = Dict{Vector{Int}, String}()
+
+    for raw_name in compositions_raw
+        # Count occurrences of each unit type for this raw composition string
+        # We handle "empty" by setting its count to 0 in the matrix
+        parts = split(raw_name, "-")
+        signature = [u == "empty" ? 0 : count(==(u), parts) for u in unit_names]
+
+        # If we haven't seen this combination of units before, create a name for it
+        if !haskey(unique_map, signature)
+            if all(signature .== 0) || raw_name == "empty"
+                unique_map[signature] = "empty"
+            else
+                # Create a name like "1xERF, 1xICA"
+                # We sort the labels so that order doesn't matter
+                labels = ["$(signature[i])x$(unit_names[i])" 
+                          for i in eachindex(unit_names) 
+                          if signature[i] > 0 && unit_names[i] != "empty"]
+                unique_map[signature] = join(sort(labels), ", ")
+            end
+        end
+    end
+
+    # 2. Extract unique signatures and sort them to keep indexing consistent
+    # Sorting by the Pretty Name (String)
+    sorted_signatures = sort(collect(keys(unique_map)), by = sig -> unique_map[sig])
     
-    # 2. Initialize the dictionaries for results
+    # 3. Create the outputs
+    compositions = [unique_map[sig] for sig in sorted_signatures]
+    
+    C = length(compositions)
+    M = length(unit_names)
+    
+    # Initialize a 2D Matrix of integers [C rows, M columns]
+    counts_matrix = zeros(Int, C, M)
+    for c in 1:C
+        counts_matrix[c, :] = sorted_signatures[c]
+    end
+
+    return compositions, counts_matrix
+end
+
+function get_coupling_matrices(counts_per_comp, unit_names)
+    # Initialize the dictionaries for results
     # Key format: (unit_name, composition_from, composition_to)
     coupled = Dict{Tuple{Int, Int, Int}, Int}()
     decoupled = Dict{Tuple{Int, Int, Int}, Int}()
     
     # 3. Fill the dictionaries
     for m in 1:length(unit_names)
-        for c_from in 1:length(compositions)
-            for c_to in 1:length(compositions)
+        for c_from in 1:size(counts_per_comp, 1)
+            for c_to in 1:size(counts_per_comp, 1)
                 # Calculate the change in number of units
-                diff = counts_per_comp[c_to][m] - counts_per_comp[c_from][m]
+                diff = counts_per_comp[c_to, m] - counts_per_comp[c_from, m]
                 
                 # Assign to the correct dictionary
                 coupled[(m, c_from, c_to)] = max(0, diff)
@@ -103,7 +136,7 @@ function get_coupling_matrices(compositions, unit_names)
         end
     end
     
-    return counts_per_comp, coupled, decoupled
+    return coupled, decoupled
 end
 
 
@@ -133,11 +166,11 @@ function get_composition_details(compositions, RS_Details, counts_per_comp)
     
     for c in 1:length(compositions)
         # Calculate the cost for this composition
-        cost = sum(counts_per_comp[c][m] * RS_Details[!, "Kilometer costs"][m] for m in 1:nrow(RS_Details))
+        cost = sum(counts_per_comp[c, m] * RS_Details[!, "Kilometer costs"][m] for m in 1:nrow(RS_Details))
         comp_costs[c] = cost
 
         # Calculate the seats for this composition
-        seats = sum(counts_per_comp[c][m] * RS_Details[!, "Seats"][m] for m in 1:nrow(RS_Details))
+        seats = sum(counts_per_comp[c, m] * RS_Details[!, "Seats"][m] for m in 1:nrow(RS_Details))
         comp_seats[c] = seats
     end
     

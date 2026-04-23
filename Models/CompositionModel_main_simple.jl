@@ -18,7 +18,7 @@ connections = build_connections(timetable_data)
 # Read specific sheets from Excel file
 excel_file = XLSX.readxlsx(joinpath(project_root, "Data", "Base Day TUE.xlsx"))
 RS_Data = DataFrame(XLSX.gettable(excel_file["Rolling Stock"]))
-compositions = DataFrame(XLSX.gettable(excel_file["Composition groups"], header=false))[!, 1]
+compositions_raw = DataFrame(XLSX.gettable(excel_file["Composition groups"], header=false))[!, 1]
 night_capacity = DataFrame(XLSX.gettable(excel_file["Night capacity"]))
 night_capacity_dict = Dict(
     (row.Station, row."Rolling stock types") => (row."Start Limit (count)", row."End Limit (count)") 
@@ -26,7 +26,7 @@ night_capacity_dict = Dict(
 )
 
 # add an "empty" composition to represent the special composition for trips starting at "Start" or ending at "End"
-push!(compositions, "empty")
+push!(compositions_raw, "empty")
 push!(RS_Data, (
     Name = "empty",
     Description = "empty",
@@ -45,24 +45,29 @@ station_to_idx = Dict(name => i for (i, name) in enumerate(stations))
 
 # define number of types and units
 M = nrow(RS_Data)
-C = length(compositions)
 n_trips = nrow(timetable_data)
 N = nrow(connections)
 S = length(stations)
-time = unique(vcat(timetable_data.DepartureFromStation, timetable_data.ArrivalToStation))
 
-# Get composition counts [1:C, 1:M], coupling and decoupling matrices [1:M, 1:C, 1:C]
-comp_number, coupled_dict, decoupled_dict = get_coupling_matrices(compositions, RS_Data.Name)
+# Create unique composition names by sorting the units in the composition (e.g., "ICA-ERF" and "ERF-ICA" both become "1xERF, 1xICA")
+# and get the counts of each unit in each composition
+compositions, comp_number = get_normalized_compositions(compositions_raw, RS_Data.Name)
+
+C = length(compositions)
+
+empty_comp_idx = findfirst(==( "empty"), compositions)
+
+# Get coupling and decoupling matrices [1:M, 1:C, 1:C]
+coupled_dict, decoupled_dict = get_coupling_matrices(comp_number, RS_Data.Name)
 
 # Get composition costs per kilometer [1:C]
 comp_costs, comp_seats = get_composition_details(compositions, RS_Data[!, ["Kilometer costs", "Seats"]], comp_number)
 
 # define indices of compositions that contain only electrified units -> they are not allowed for trips that require non-electrified rolling stock
-electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (comp_number[c][m] > 0) for m in 1:M)]
+electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (comp_number[c, m] > 0) for m in 1:M)]
 
 # define penalty parameters for coupling and decoupling (example: 100 per unit)
 coupling_penalty = 10
-decoupling_penalty = 10
 end_of_day_penalty = 100000
 extra_unit_penalty = 100000
 
@@ -99,19 +104,22 @@ model = Model(Gurobi.Optimizer)
 # ----------- Objective -----------
 # Minimize total cost (km_costs * distance)
 @objective(model, Min, sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:n_trips) # distance costs for each composition used
-    + sum(v1[m, n] * coupling_penalty for m in 1:M, n in 1:N) # make coupling/decoupling less attractive
-    + sum(v2[m, n] * decoupling_penalty for m in 1:M, n in 1:N)
-    + sum(balance_shortage[m, s] * end_of_day_penalty for m in 1:M, s in 1:S)
-    + sum(balance_excess[m, s] * end_of_day_penalty for m in 1:M, s in 1:S)
+    + sum((v1[m, n] + v2[m, n]) * coupling_penalty for m in 1:M, n in 1:N) # make coupling/decoupling less attractive
+    + sum((balance_shortage[m, s] + balance_excess[m, s]) * end_of_day_penalty for m in 1:M, s in 1:S)
     + sum(extra_units[m, s] * extra_unit_penalty for m in 1:M, s in 1:S)
 )
 
-# Fix composition 36 (empty) for trips starting at "Start" or ending at "End"
+# Fix composition empty_comp_idx (empty) for trips starting at "Start" or ending at "End"
 for j in 1:n_trips
     if timetable_data.FromStation[j] == "Start" || timetable_data.ToStation[j] == "End"
-        fix(y[36, j], 1; force=true)
+        fix(y[empty_comp_idx, j], 1; force=true)
+        for c in 1:C
+            if c != empty_comp_idx
+                fix(y[c, j], 0; force=true)
+            end
+        end
     else
-        fix(y[36, j], 0; force=true)
+        fix(y[empty_comp_idx, j], 0; force=true)
     end
 end
 
@@ -124,25 +132,15 @@ for j in 1:n_trips
     end
 end
 
-# A. Global Station Balance (Type-based overnight requirement)
-for m in 1:M, s in 1:S  # coupled + excess == decoupled + shortage
-    @constraint(model, sum(v1[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_excess[m, s] == sum(v2[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_shortage[m, s])
-end
-
-# B. Demand Coverage
-for j in 1:n_trips
-    @constraint(model, sum(y[c, j] * comp_seats[c] for c in 1:C) >= timetable_data.Demand[j])
-end
-
-# C. Each trip must have EXACTLY one composition assigned
+# A. Each trip must have EXACTLY one composition assigned
 for j in 1:n_trips
     @constraint(model, sum(y[c, j] for c in 1:C) == 1)
 end
 
-# D. If composition c is used for trip j, then the connection variable x must be set to 1 for exactly one of the corresponding connections
+# B. If composition c is used for trip j, then the connection variable x must be set to 1 for exactly one of the corresponding connections
 for j in 1:n_trips
 
-    # D1. connections n where trip j is the first trip (FromStation) in the connection
+    # B1. connections n where trip j is the first trip (FromStation) in the connection
     connections_first = [n for n in 1:N if connections[n, "FromStation"] == timetable_data.FromStation[j] && connections[n, "TrainId"] == timetable_data.TrainId[j]]
 
     if length(connections_first) == 1
@@ -157,7 +155,7 @@ for j in 1:n_trips
         println("Warning: Trip $j has ", length(connections_first), " connections where it is the first trip. Connections: ", connections_first)
     end
 
-    # D2. connections n where trip j is the second trip (ToStation) in the connection
+    # B2. connections n where trip j is the second trip (ToStation) in the connection
     connections_second = [n for n in 1:N if connections[n, "ToStation"] == timetable_data.ToStation[j] && connections[n, "TrainId"] == timetable_data.TrainId[j]]
 
     if length(connections_second) == 1
@@ -173,10 +171,20 @@ for j in 1:n_trips
     end
 end
 
-# E. Define how many units of each type are decoupled and coupled in a connection
+# C. Define how many units of each type are decoupled and coupled in a connection
 for m in 1:M, n in 1:N
     @constraint(model, v1[m, n] == sum(coupled_dict[(m, c1, c2)] * x[c1, c2, n] for c1 in 1:C, c2 in 1:C))
     @constraint(model, v2[m, n] == sum(decoupled_dict[(m, c1, c2)] * x[c1, c2, n] for c1 in 1:C, c2 in 1:C))
+end
+
+# D. Demand Coverage
+for j in 1:n_trips
+    @constraint(model, sum(y[c, j] * comp_seats[c] for c in 1:C) >= timetable_data.Demand[j])
+end
+
+# E. Global Station Balance (Type-based overnight requirement)
+for m in 1:M, s in 1:S  # coupled + excess == decoupled + shortage
+    @constraint(model, sum(v1[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_excess[m, s] == sum(v2[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_shortage[m, s])
 end
 
 # F. define storage variable - storage = night_capacity - coupled + uncoupled + extra (allow extra units, if necessary, but expensive)
@@ -234,7 +242,7 @@ if termination_status(model) == OPTIMAL
     for j in 1:n_trips
         assigned_comps = [c for c in 1:C if value(y[c, j]) > 0.5]
         for c in assigned_comps 
-            if c != 36 # skip "empty" composition in output
+            if c != empty_comp_idx # skip "empty" composition in output
                 push!(assignments, (
                     TripId = j,
                     TrainId = timetable_data.TrainId[j],
@@ -256,7 +264,7 @@ if termination_status(model) == OPTIMAL
         sorted_g = sort(g, :Departure)
         append!(ordered_assignments, sorted_g)
     end
-    CSV.write(joinpath(project_root, "results_composition_assignments.csv"), ordered_assignments)
+    CSV.write(joinpath(project_root, "results_simpleCompModel_compAssignments.csv"), ordered_assignments)
 
     balance_df = DataFrame(
         Reason = String[],
@@ -297,7 +305,7 @@ if termination_status(model) == OPTIMAL
     end
 
     if !isempty(balance_df)
-        CSV.write(joinpath(project_root, "results_balance.csv"), balance_df)
+        CSV.write(joinpath(project_root, "results_simpleCompModel_balance.csv"), balance_df)
     end
     
 else
