@@ -15,6 +15,7 @@ include(joinpath(project_root, "Models", "CompositionModel_functions.jl"))
 timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "aggregated_trips_with_terminals.csv"), DataFrame)
 connections = build_connections(timetable_data)
 actual_connections = [n for n in 1:nrow(connections) if connections[n, "FromStation"] != "Start" && connections[n, "ToStation"] != "End"]
+actual_trips = [j for j in 1:n_trips if timetable_data.FromStation[j] != "Start" && timetable_data.ToStation[j] != "End"]
 
 # Read specific sheets from Excel file
 excel_file = XLSX.readxlsx(joinpath(project_root, "Data", "Base Day TUE.xlsx"))
@@ -49,6 +50,8 @@ M = nrow(RS_Data)
 n_trips = nrow(timetable_data)
 N = nrow(connections)
 S = length(stations)
+TiD = unique(timetable_data.TrainId)
+TiD_to_idx = Dict(tid => i for (i, tid) in enumerate(TiD))
 
 # Create unique composition names by sorting the units in the composition (e.g., "ICA-ERF" and "ERF-ICA" both become "1xERF, 1xICA")
 # and get the counts of each unit in each composition
@@ -102,6 +105,9 @@ model = Model(Gurobi.Optimizer)
 # extra_units[m, s] - number of units of type m that additionally start at station s on top of night capacity
 @variable(model, extra_units[m=1:M, s=1:S] >= 0)
 
+# unit_type[m, j] = 1 if train with TrainId tid has main unit type m, 0 otherwise
+@variable(model, unit_type[m=1:M, j=1:n_trips], Bin)
+
 # ----------- Objective -----------
 # Minimize total cost (km_costs * distance)
 @objective(model, Min, sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:n_trips) # distance costs for each composition used
@@ -136,6 +142,34 @@ end
 # A. Each trip must have EXACTLY one composition assigned
 for j in 1:n_trips
     @constraint(model, sum(y[c, j] for c in 1:C) == 1)
+end
+
+for j in 1:n_trips
+    if j in actual_trips
+        @constraint(model, sum(unit_type[m, j] for m in 1:M) == 1) # each real trip has exactly one main unit type
+        for m in 1:M
+            @constraint(model, unit_type[m, j] <= sum(y[c, j] * comp_number[c, m] for c in 1:C))
+        end
+    else
+        for m in 1:M
+            fix(unit_type[m, j], 0; force=true) # terminal trips have no main unit type
+        end
+    end
+end
+
+for tid in TiD
+    # Get all REAL trips associated with this TrainId
+    trips_for_tid = [j for j in actual_trips if timetable_data.TrainId[j] == tid]
+    
+    if length(trips_for_tid) > 1
+        for i in 1:(length(trips_for_tid) - 1)
+            j_current = trips_for_tid[i]
+            j_next = trips_for_tid[i+1]
+            for m in 1:M
+                @constraint(model, unit_type[m, j_current] == unit_type[m, j_next])
+            end
+        end
+    end
 end
 
 # B. If composition c is used for trip j, then the connection variable x must be set to 1 for exactly one of the corresponding connections
@@ -258,7 +292,7 @@ if termination_status(model) == OPTIMAL
         sorted_g = sort(g, :Departure)
         append!(ordered_assignments, sorted_g)
     end
-    CSV.write(joinpath(project_root, "results_simpleCompModel_compAssignments.csv"), ordered_assignments)
+    CSV.write(joinpath(project_root, "results_UnitPreservation_compAssignments.csv"), ordered_assignments)
 
     balance_df = DataFrame(
         Reason = String[],
@@ -299,7 +333,7 @@ if termination_status(model) == OPTIMAL
     end
 
     if !isempty(balance_df)
-        CSV.write(joinpath(project_root, "results_simpleCompModel_balance.csv"), balance_df)
+        CSV.write(joinpath(project_root, "results_UnitPreservation_balance.csv"), balance_df)
     else
         println("No balance issues or extra units needed at the end of the day.")
     end

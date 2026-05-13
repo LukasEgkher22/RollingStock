@@ -12,7 +12,7 @@ include(joinpath(project_root, "DataTransformationScripts", "DataManipulation_fu
 include(joinpath(project_root, "Models", "CompositionModel_functions.jl"))
 
 # Read merged data from CSV
-timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "aggregated_trips_with_terminals.csv"), DataFrame)
+timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "aggregated_trips_with_terminals_MTrains_manually.csv"), DataFrame)
 connections = build_connections(timetable_data)
 actual_connections = [n for n in 1:nrow(connections) if connections[n, "FromStation"] != "Start" && connections[n, "ToStation"] != "End"]
 
@@ -69,8 +69,6 @@ electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (com
 
 # define penalty parameters for coupling and decoupling (example: 100 per unit)
 coupling_penalty = 100
-end_of_day_penalty = 100000
-extra_unit_penalty = 100000
 
 timetable_data.Index = 1:n_trips
 
@@ -94,20 +92,10 @@ model = Model(Gurobi.Optimizer)
 # storage[m, n] - non-negative number of units of type m stored at the station of connection n (after coupling and decoupling)
 @variable(model, storage[m=1:M, n=1:N] >= 0)
 
-# balance_shortage[m, s] - number of units of type m that are too little at station s at the end of the day compared to the start (overnight requirement)
-@variable(model, balance_shortage[m=1:M, s=1:S] >= 0)
-# balance_excess[m, s] - number of units of type m that are too much at station s at the end of the day compared to the start (overnight requirement)
-@variable(model, balance_excess[m=1:M, s=1:S] >= 0)
-
-# extra_units[m, s] - number of units of type m that additionally start at station s on top of night capacity
-@variable(model, extra_units[m=1:M, s=1:S] >= 0)
-
 # ----------- Objective -----------
 # Minimize total cost (km_costs * distance)
 @objective(model, Min, sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:n_trips) # distance costs for each composition used
     + sum((v1[m, n] + v2[m, n]) * coupling_penalty for m in 1:M, n in actual_connections) # make coupling/decoupling less attractive
-    + sum((balance_shortage[m, s] + balance_excess[m, s]) * end_of_day_penalty for m in 1:M, s in 1:S)
-    + sum(extra_units[m, s] * extra_unit_penalty for m in 1:M, s in 1:S)
 )
 
 # Fix composition empty_comp_idx (empty) for trips starting at "Start" or ending at "End"
@@ -185,11 +173,10 @@ end
 
 # E. Global Station Balance (Type-based overnight requirement)
 for m in 1:M, s in 1:S  # coupled + excess == decoupled + shortage
-    @constraint(model, sum(v1[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_excess[m, s] == sum(v2[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_shortage[m, s])
-    # @constraint(model, sum(v1[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) == sum(v2[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]))
+    @constraint(model, sum(v1[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) == sum(v2[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]))
 end
 
-# F. define storage variable - storage = night_capacity - coupled + uncoupled + extra (allow extra units, if necessary, but expensive)
+# F. define storage variable - storage = night_capacity - coupled + uncoupled
 for n in 1:N
     earlier_connections = [n2 for n2 in 1:N if
         (connections[n2, "ArrivalAtConnection"] <= connections[n, "DepartureFromConnection"])
@@ -197,8 +184,7 @@ for n in 1:N
     ]
     for m in 1:M
         @constraint(model, 
-            storage[m, n] == extra_units[m, station_to_idx[connections[n, "ConnectionStation"]]] +
-                get(night_capacity_dict, (connections[n, "ConnectionStation"], RS_Data.Name[m]), (0, 0))[1]
+            storage[m, n] == get(night_capacity_dict, (connections[n, "ConnectionStation"], RS_Data.Name[m]), (0, 0))[1]
                 + sum(v2[m, n2] - v1[m, n2] for n2 in earlier_connections)
         )
     end
@@ -258,52 +244,8 @@ if termination_status(model) == OPTIMAL
         sorted_g = sort(g, :Departure)
         append!(ordered_assignments, sorted_g)
     end
-    CSV.write(joinpath(project_root, "results_simpleCompModel_compAssignments.csv"), ordered_assignments)
+    CSV.write(joinpath(project_root, "results_NoImbalance_compAssignments.csv"), ordered_assignments)
 
-    balance_df = DataFrame(
-        Reason = String[],
-        Station = String[],
-        Type = String[],
-        Count = Int[]
-    )
-
-    for m in 1:M, s in 1:S
-        shortage = value(balance_shortage[m, s])
-        excess = value(balance_excess[m, s])
-        extra = value(extra_units[m, s])
-        
-        if shortage > 0.5
-            push!(balance_df, (
-                Reason = "End-of-day shortage",
-                Station = stations[s],
-                Type = RS_Data.Name[m],
-                Count = round(Int, shortage)
-            ))
-        end
-        if excess > 0.5
-            push!(balance_df, (
-                Reason = "End-of-day excess",
-                Station = stations[s],
-                Type = RS_Data.Name[m],
-                Count = round(Int, excess)
-            ))
-        end
-        if extra > 0.5
-            push!(balance_df, (
-                Reason = "Extra units deployed",
-                Station = stations[s],
-                Type = RS_Data.Name[m],
-                Count = round(Int, extra)
-            ))
-        end
-    end
-
-    if !isempty(balance_df)
-        CSV.write(joinpath(project_root, "results_simpleCompModel_balance.csv"), balance_df)
-    else
-        println("No balance issues or extra units needed at the end of the day.")
-    end
-    
 else
     println("No optimal solution found.")
 end

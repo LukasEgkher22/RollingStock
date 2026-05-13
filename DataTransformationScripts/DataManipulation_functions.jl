@@ -267,7 +267,7 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
 
     results = []
 
-    # Group by Train
+    # Group by Train from the timetable (this is our primary source)
     gdf_tt = groupby(tt, [:TrainCategory, :TrainId])
 
     for train_tt in gdf_tt
@@ -276,52 +276,58 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
 
         # Filter passenger data for this train
         train_ps = ps[(ps.TrainCategory .== t_cat) .& (ps.TrainId .== t_id), :]
-        if isempty(train_ps) continue end
+        
+        # LOGIC: Skip if no passenger data UNLESS it is Category "M"
+        if isempty(train_ps) #&& t_cat != "M" 
+            continue 
+        end
 
         # Map for station info: Name -> (Index, Type)
         st_info = Dict(row.Station => (i, row.Type) for (i, row) in enumerate(eachrow(train_tt)))
 
         # --- STEP A: Consolidate Section Loads into Stop-to-Stop Segments ---
-        # transform A-B(30), B-D(30) [where B is pass] into A-D(30) and give a warning if demand changes at B
         cleaned_segments = []
-        i = 1
-        while i <= nrow(train_ps)
-            from_st = string(train_ps[i, :FromStation])
-            to_st   = string(train_ps[i, :ToStation])
-            demand  = train_ps[i, :PassengerNum]
+        
+        # Only run consolidation if we actually have passenger data
+        if !isempty(train_ps)
+            i = 1
+            while i <= nrow(train_ps)
+                from_st = string(train_ps[i, :FromStation])
+                to_st   = string(train_ps[i, :ToStation])
+                demand  = train_ps[i, :PassengerNum]
 
-            # Chain rows as long as the 'to_st' is a "stop" station
-            while i < nrow(train_ps) && get(st_info, to_st, (0, "stop"))[2] == "pass"
-                i += 1
-                next_demand = train_ps[i, :PassengerNum]
-                
-                if next_demand != demand
-                    @warn "Demand changed from $demand to $next_demand at pass station '$to_st' (Train $t_id)."
-                    demand = max(demand, next_demand)  # Optionally take the max demand to be conservative
+                # Chain rows as long as the 'to_st' is a "pass" station
+                while i < nrow(train_ps) && get(st_info, to_st, (0, "stop"))[2] == "pass"
+                    i += 1
+                    next_demand = train_ps[i, :PassengerNum]
+                    
+                    if next_demand != demand
+                        @warn "Demand changed from $demand to $next_demand at pass station '$to_st' (Train $t_id)."
+                        demand = max(demand, next_demand) 
+                    end
+                    
+                    to_st = string(train_ps[i, :ToStation])
                 end
                 
-                to_st = string(train_ps[i, :ToStation])
+                idx_f = get(st_info, from_st, (0, ""))[1]
+                idx_t = get(st_info, to_st, (0, ""))[1]
+                
+                if idx_f != 0 && idx_t != 0
+                    push!(cleaned_segments, (f_idx=idx_f, t_idx=idx_t, demand=demand))
+                end
+                i += 1
             end
-            
-            # Store the cleaned segment with its timetable indices
-            idx_f = get(st_info, from_st, (0, ""))[1]
-            idx_t = get(st_info, to_st, (0, ""))[1]
-            
-            if idx_f != 0 && idx_t != 0
-                push!(cleaned_segments, (f_idx=idx_f, t_idx=idx_t, demand=demand))
-            end
-            i += 1
         end
 
         # --- STEP B: Map to Timetable Stop-to-Stop Legs ---
-        # If tt has stops A, B, C, D and cleaned_ps has A-D(30) create rows for A-B(30), B-C(30), C-D(30)
         stop_indices = findall(x -> x == "stop", train_tt.Type)
         
         for k in 1:(length(stop_indices) - 1)
             idx_start = stop_indices[k]
             idx_end   = stop_indices[k+1]
             
-            # Find which cleaned segment covers this specific stop-to-stop leg
+            # Find demand from cleaned segments. 
+            # If cleaned_segments is empty (Category M case), leg_demand stays 0.
             leg_demand = 0
             for seg in cleaned_segments
                 if seg.f_idx <= idx_start && seg.t_idx >= idx_end
@@ -330,34 +336,28 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
                 end
             end
 
-            # Get infrastructure data for this leg
-             # 2. AGGREGATE INFRASTRUCTURE DATA
-            # We look at every single step in the timetable between idx_start and idx_end
+            # --- AGGREGATE INFRASTRUCTURE DATA ---
             total_distance = 0.0
             is_fully_electrified = true
             segment_found_count = 0
-            required_segments = idx_end - idx_start
 
             for j in idx_start:(idx_end - 1)
                 st_a = train_tt.Station[j]
                 st_b = train_tt.Station[j+1]
                 
-                # Sort keys to match Dict format
                 route_key = st_a < st_b ? (st_a, st_b) : (st_b, st_a)
                 
                 if haskey(df_infrastructure, route_key)
                     infra = df_infrastructure[route_key]
                     total_distance += infra.km
-                    # If any single part is NOT electrified, the whole leg is not
                     is_fully_electrified = is_fully_electrified && infra.electrified
                     segment_found_count += 1
                 else
-                    @warn "Missing infrastructure data for segment: $st_a to $st_b"
+                    @warn "Missing infra: $st_a to $st_b"
                     is_fully_electrified = false
                 end
             end
 
-            # If no segments were found, ensure distance is 0 and electrified is false
             if segment_found_count == 0
                 is_fully_electrified = false
             end
@@ -369,7 +369,7 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
                 DepartureFromStation = time_string_to_minutes(train_tt.Departure[idx_start]),
                 ToStation            = train_tt.Station[idx_end],
                 ArrivalToStation     = time_string_to_minutes(train_tt.Arrival[idx_end]),
-                Demand               = leg_demand,
+                Demand               = leg_demand, # Will be 0 for 'M' if no data was found
                 Distance_KM          = round(total_distance, digits = 1),
                 Electrified          = is_fully_electrified
             ))
