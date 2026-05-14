@@ -278,7 +278,7 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
         train_ps = ps[(ps.TrainCategory .== t_cat) .& (ps.TrainId .== t_id), :]
         
         # LOGIC: Skip if no passenger data UNLESS it is Category "M"
-        if isempty(train_ps) #&& t_cat != "M" 
+        if isempty(train_ps) && t_cat != "M"
             continue 
         end
 

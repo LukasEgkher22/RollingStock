@@ -14,7 +14,6 @@ include(joinpath(project_root, "Models", "CompositionModel_functions.jl"))
 # Read merged data from CSV
 timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "aggregated_trips_with_terminals.csv"), DataFrame)
 connections = build_connections(timetable_data)
-actual_connections = [n for n in 1:nrow(connections) if connections[n, "FromStation"] != "Start" && connections[n, "ToStation"] != "End"]
 
 # Read specific sheets from Excel file
 excel_file = XLSX.readxlsx(joinpath(project_root, "Data", "Base Day TUE.xlsx"))
@@ -46,9 +45,14 @@ station_to_idx = Dict(name => i for (i, name) in enumerate(stations))
 
 # define number of types and units
 M = nrow(RS_Data)
-n_trips = nrow(timetable_data)
+J = nrow(timetable_data)
 N = nrow(connections)
 S = length(stations)
+TiD = unique(timetable_data.TrainId)
+
+# define actual connections and trips (exclude trips starting/ending at "Start"/"End")
+actual_connections = [n for n in 1:nrow(connections) if connections[n, "FromStation"] != "Start" && connections[n, "ToStation"] != "End"]
+actual_trips = [j for j in 1:J if timetable_data.FromStation[j] != "Start" && timetable_data.ToStation[j] != "End"]
 
 # Create unique composition names by sorting the units in the composition (e.g., "ICA-ERF" and "ERF-ICA" both become "1xERF, 1xICA")
 # and get the counts of each unit in each composition
@@ -69,10 +73,10 @@ electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (com
 
 # define penalty parameters for coupling and decoupling (example: 100 per unit)
 coupling_penalty = 100
-end_of_day_penalty = 100000
-extra_unit_penalty = 100000
+end_of_day_penalty = 10000
+extra_unit_penalty = 10000
 
-timetable_data.Index = 1:n_trips
+timetable_data.Index = 1:J
 
 # -----------------------------------------------------------
 # CREATE MODEL
@@ -82,7 +86,7 @@ model = Model(Gurobi.Optimizer)
 # ----------- Variables -----------
 
 # y[c, j] = 1 if trip j is served by composition c
-@variable(model, y[c=1:C, j=1:n_trips], Bin)
+@variable(model, y[c=1:C, j=1:J], Bin)
 
 # x[c1, c2, n] = 1 if composition c1 and composition c2 are used for connection n 
 @variable(model, x[c1=1:C, c2=1:C, n=1:N], Bin)
@@ -102,16 +106,19 @@ model = Model(Gurobi.Optimizer)
 # extra_units[m, s] - number of units of type m that additionally start at station s on top of night capacity
 @variable(model, extra_units[m=1:M, s=1:S] >= 0)
 
+# unit_type[m, j] = 1 if train with TrainId tid has main unit type m, 0 otherwise
+@variable(model, unit_type[m=1:M, j=1:J], Bin)
+
 # ----------- Objective -----------
 # Minimize total cost (km_costs * distance)
-@objective(model, Min, sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:n_trips) # distance costs for each composition used
+@objective(model, Min, sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:J) # distance costs for each composition used
     + sum((v1[m, n] + v2[m, n]) * coupling_penalty for m in 1:M, n in actual_connections) # make coupling/decoupling less attractive
     + sum((balance_shortage[m, s] + balance_excess[m, s]) * end_of_day_penalty for m in 1:M, s in 1:S)
     + sum(extra_units[m, s] * extra_unit_penalty for m in 1:M, s in 1:S)
 )
 
 # Fix composition empty_comp_idx (empty) for trips starting at "Start" or ending at "End"
-for j in 1:n_trips
+for j in 1:J
     if timetable_data.FromStation[j] == "Start" || timetable_data.ToStation[j] == "End"
         fix(y[empty_comp_idx, j], 1; force=true)
         for c in 1:C
@@ -125,7 +132,7 @@ for j in 1:n_trips
 end
 
 # Fix compositions for trips that do not allow electrified rolling stock
-for j in 1:n_trips
+for j in 1:J
     if timetable_data.Electrified[j] == false
         for c in electrified_comps
             fix(y[c, j], 0; force=true)
@@ -134,12 +141,40 @@ for j in 1:n_trips
 end
 
 # A. Each trip must have EXACTLY one composition assigned
-for j in 1:n_trips
+for j in 1:J
     @constraint(model, sum(y[c, j] for c in 1:C) == 1)
 end
 
+for j in 1:J
+    if j in actual_trips
+        @constraint(model, sum(unit_type[m, j] for m in 1:M) == 1) # each real trip has exactly one main unit type
+        for m in 1:M
+            @constraint(model, unit_type[m, j] <= sum(y[c, j] * comp_number[c, m] for c in 1:C))
+        end
+    else
+        for m in 1:M
+            fix(unit_type[m, j], 0; force=true) # terminal trips have no main unit type
+        end
+    end
+end
+
+for tid in TiD
+    # Get all REAL trips associated with this TrainId
+    trips_for_tid = [j for j in actual_trips if timetable_data.TrainId[j] == tid]
+    
+    if length(trips_for_tid) > 1
+        for i in 1:(length(trips_for_tid) - 1)
+            j_current = trips_for_tid[i]
+            j_next = trips_for_tid[i+1]
+            for m in 1:M
+                @constraint(model, unit_type[m, j_current] == unit_type[m, j_next])
+            end
+        end
+    end
+end
+
 # B. If composition c is used for trip j, then the connection variable x must be set to 1 for exactly one of the corresponding connections
-for j in 1:n_trips
+for j in 1:J
 
     # B1. connections n where trip j is the first trip (FromStation) in the connection
     connections_first = [n for n in 1:N if connections[n, "FromStation"] == timetable_data.FromStation[j] && connections[n, "TrainId"] == timetable_data.TrainId[j]]
@@ -179,14 +214,13 @@ for m in 1:M, n in 1:N
 end
 
 # D. Demand Coverage
-for j in 1:n_trips
+for j in 1:J
     @constraint(model, sum(y[c, j] * comp_seats[c] for c in 1:C) >= timetable_data.Demand[j])
 end
 
 # E. Global Station Balance (Type-based overnight requirement)
 for m in 1:M, s in 1:S  # coupled + excess == decoupled + shortage
-    @constraint(model, sum(v1[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_excess[m, s] == sum(v2[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_shortage[m, s])
-    # @constraint(model, sum(v1[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) == sum(v2[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]))
+    @constraint(model, sum(v1[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_excess[m, s] == sum(v2[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_shortage[m, s])    
 end
 
 # F. define storage variable - storage = night_capacity - coupled + uncoupled + extra (allow extra units, if necessary, but expensive)
@@ -232,7 +266,7 @@ if termination_status(model) == OPTIMAL
         Composition = String[]
     )
 
-    for j in 1:n_trips
+    for j in 1:J
         assigned_comps = [c for c in 1:C if value(y[c, j]) > 0.5]
         for c in assigned_comps 
             if c != empty_comp_idx # skip "empty" composition in output
@@ -258,8 +292,10 @@ if termination_status(model) == OPTIMAL
         sorted_g = sort(g, :Departure)
         append!(ordered_assignments, sorted_g)
     end
-    CSV.write(joinpath(project_root, "results_simpleCompModel_compAssignments.csv"), ordered_assignments)
 
+    timestamp = Dates.format(Dates.now(), "yyyy-mm-dd_HH-MM-SS")    
+    CSV.write(joinpath(project_root, "Results", "CompAssignments_unitPreservation_$(timestamp).csv"), ordered_assignments)
+    
     balance_df = DataFrame(
         Reason = String[],
         Station = String[],
@@ -299,9 +335,28 @@ if termination_status(model) == OPTIMAL
     end
 
     if !isempty(balance_df)
-        CSV.write(joinpath(project_root, "results_simpleCompModel_balance.csv"), balance_df)
+        CSV.write(joinpath(project_root, "Results", "BalanceIssues_unitPreservation_$(timestamp).csv"), balance_df)
     else
         println("No balance issues or extra units needed at the end of the day.")
+    end
+
+    # Get MetaData for the solver run
+    status = termination_status(model)
+    runtime = solve_time(model)
+    obj_val = has_values(model) ? objective_value(model) : "No solution"
+    bound = try objective_bound(model) catch; "N/A" end
+    gap = try relative_optimality_gap(model) catch; "N/A" end
+
+    open(joinpath(project_root, "Results", "Summary_unitPreservation_$(timestamp).txt"), "w") do f
+        write(f, "------------------------------------------\n")
+        write(f, "SOLVER REPORT\n")
+        write(f, "------------------------------------------\n")
+        write(f, "Status:         $(status)\n")
+        write(f, "Runtime:        $(round(runtime, digits=2)) seconds\n")
+        write(f, "Objective:      $(obj_val)\n")
+        write(f, "Lower Bound:    $(bound)\n")
+        write(f, "Optimality Gap: $(gap)\n")
+        write(f, "------------------------------------------\n")
     end
     
 else
