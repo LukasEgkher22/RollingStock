@@ -72,8 +72,7 @@ electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (com
 
 # define penalty parameters for coupling and decoupling (example: 100 per unit)
 v_penalty = 100
-end_of_day_penalty = 10000
-extra_unit_penalty = 10000
+extra_unit_penalty = 100000
 
 timetable_data.Index = 1:J
 
@@ -104,8 +103,8 @@ model = Model(Gurobi.Optimizer)
 # extra_units[m, s] - number of units of type m that additionally start at station s on top of night capacity
 @variable(model, extra_units[m=1:M, s=1:S] >= 0)
 
-# unit_type[m, j] = 1 if train with TrainId tid has main unit type m, 0 otherwise
-@variable(model, unit_type[m=1:M, j=1:J], Bin)
+# u[m, j] = 1 if train with TrainId tid has main unit type m, 0 otherwise
+@variable(model, u[m=1:M, j=1:J], Bin)
 
 # ----------- Objective -----------
 # Minimize total cost (km_costs * distance)
@@ -212,14 +211,14 @@ end
 for j in 1:J
     if j in actual_trips
         # G1. Each real trip has exactly one main unit type
-        @constraint(model, sum(unit_type[m, j] for m in 1:M) == 1)
+        @constraint(model, sum(u[m, j] for m in 1:M) == 1)
         for m in 1:M
             # G2. If a trip has main unit type m, then it can only be assigned compositions that contain that unit type
-            @constraint(model, unit_type[m, j] <= sum(y[c, j] * comp_number[c, m] for c in 1:C))
+            @constraint(model, u[m, j] <= sum(y[c, j] * comp_number[c, m] for c in 1:C))
         end
     else
         for m in 1:M
-            fix(unit_type[m, j], 0; force=true) # terminal trips have no main unit type
+            fix(u[m, j], 0; force=true) # terminal trips have no main unit type
         end
     end
 end
@@ -234,7 +233,7 @@ for tid in TiD
             j_current = trips_for_tid[i]
             j_next = trips_for_tid[i+1]
             for m in 1:M
-                @constraint(model, unit_type[m, j_current] == unit_type[m, j_next])
+                @constraint(model, u[m, j_current] == u[m, j_next])
             end
         end
     end
@@ -348,6 +347,9 @@ if termination_status(model) == OPTIMAL
         write(f, "Lower Bound:    $(bound)\n")
         write(f, "Optimality Gap: $(gap)\n")
         write(f, "------------------------------------------\n")
+        write(f, "Model Parameters:\n")
+        write(f, "- v_penalty: $coupling_penalty\n")
+        write(f, "- extra_unit_penalty: $extra_unit_penalty\n")
     end
     
 else

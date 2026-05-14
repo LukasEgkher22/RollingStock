@@ -106,8 +106,8 @@ model = Model(Gurobi.Optimizer)
 # extra_units[m, s] - number of units of type m that additionally start at station s on top of night capacity
 @variable(model, extra_units[m=1:M, s=1:S] >= 0)
 
-# unit_type[m, j] = 1 if train with TrainId tid has main unit type m, 0 otherwise
-@variable(model, unit_type[m=1:M, j=1:J], Bin)
+# u[m, j] = 1 if train with TrainId tid has main unit type m, 0 otherwise
+@variable(model, u[m=1:M, j=1:J], Bin)
 
 # ----------- Objective -----------
 # Minimize total cost (km_costs * distance)
@@ -143,34 +143,6 @@ end
 # A. Each trip must have EXACTLY one composition assigned
 for j in 1:J
     @constraint(model, sum(y[c, j] for c in 1:C) == 1)
-end
-
-for j in 1:J
-    if j in actual_trips
-        @constraint(model, sum(unit_type[m, j] for m in 1:M) == 1) # each real trip has exactly one main unit type
-        for m in 1:M
-            @constraint(model, unit_type[m, j] <= sum(y[c, j] * comp_number[c, m] for c in 1:C))
-        end
-    else
-        for m in 1:M
-            fix(unit_type[m, j], 0; force=true) # terminal trips have no main unit type
-        end
-    end
-end
-
-for tid in TiD
-    # Get all REAL trips associated with this TrainId
-    trips_for_tid = [j for j in actual_trips if timetable_data.TrainId[j] == tid]
-    
-    if length(trips_for_tid) > 1
-        for i in 1:(length(trips_for_tid) - 1)
-            j_current = trips_for_tid[i]
-            j_next = trips_for_tid[i+1]
-            for m in 1:M
-                @constraint(model, unit_type[m, j_current] == unit_type[m, j_next])
-            end
-        end
-    end
 end
 
 # B. If composition c is used for trip j, then the connection variable x must be set to 1 for exactly one of the corresponding connections
@@ -235,6 +207,38 @@ for n in 1:N
                 get(night_capacity_dict, (connections[n, "ConnectionStation"], RS_Data.Name[m]), (0, 0))[1]
                 + sum(v2[m, n2] - v1[m, n2] for n2 in earlier_connections)
         )
+    end
+end
+
+# G. Main unit type constraints
+for j in 1:J
+    if j in actual_trips
+        # G1. Each real trip has exactly one main unit type
+        @constraint(model, sum(u[m, j] for m in 1:M) == 1)
+        for m in 1:M
+            # G2. If a trip has main unit type m, then it can only be assigned compositions that contain that unit type
+            @constraint(model, u[m, j] <= sum(y[c, j] * comp_number[c, m] for c in 1:C))
+        end
+    else
+        for m in 1:M
+            fix(u[m, j], 0; force=true) # terminal trips have no main unit type
+        end
+    end
+end
+
+# G3. Trips with the same TrainId must have the same main unit type
+for tid in TiD
+    # Get all REAL trips associated with this TrainId
+    trips_for_tid = [j for j in actual_trips if timetable_data.TrainId[j] == tid]
+    
+    if length(trips_for_tid) > 1
+        for i in 1:(length(trips_for_tid) - 1)
+            j_current = trips_for_tid[i]
+            j_next = trips_for_tid[i+1]
+            for m in 1:M
+                @constraint(model, u[m, j_current] == u[m, j_next])
+            end
+        end
     end
 end
 
@@ -357,6 +361,9 @@ if termination_status(model) == OPTIMAL
         write(f, "Lower Bound:    $(bound)\n")
         write(f, "Optimality Gap: $(gap)\n")
         write(f, "------------------------------------------\n")
+        write(f, "Model Parameters:\n")
+        write(f, "- v_penalty: $coupling_penalty\n")
+        write(f, "- extra_unit_penalty: $extra_unit_penalty\n")
     end
     
 else

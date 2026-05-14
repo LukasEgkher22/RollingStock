@@ -258,7 +258,7 @@ This function performs a three-step process:
 - Segments with stations not found in the timetable are filtered out.
 """
 
-function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrastructure::Dict; save_to_csv::Bool = false, filename::String = "merged_data.csv")
+function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrastructure::Dict; save_to_csv::Bool = false, filename::String = "merged_data.csv", add_Mtrains::Bool = false)
     # Clean types
     tt = copy(df_timetable)
     ps = copy(df_passenger)
@@ -278,7 +278,7 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
         train_ps = ps[(ps.TrainCategory .== t_cat) .& (ps.TrainId .== t_id), :]
         
         # LOGIC: Skip if no passenger data UNLESS it is Category "M"
-        if isempty(train_ps) && t_cat != "M"
+        if isempty(train_ps) && (!add_Mtrains || t_cat != "M")
             continue 
         end
 
@@ -765,6 +765,70 @@ function aggregate_train_trips(
     end
     
     return result_df
+end
+
+
+
+function create_GGV_dummies(df::DataFrame; save_to_csv::Bool = false, filename::String = "GGV_dummies.csv")
+    new_rows_list = []
+    max_time_gap = 5 # Maximum allowed time gap in minutes between the two trains for a valid GGV connection
+
+    # Iterate through potential "A" entries (the first train) and "B" entries (the second train)
+    for rowA in eachrow(df)
+        for rowB in eachrow(df)
+            
+            # Criteria checks:
+            # - Connection point match
+            # - Different Train IDs
+            # - Timing: A finishes, then B starts within the window
+            # - Not a simple back-and-forth loop
+            if rowA.ToStation == rowB.FromStation && 
+                rowA.TrainId != rowB.TrainId &&
+                0 <= (rowB.DepartureFromStation - rowA.ArrivalToStation) <= max_time_gap &&
+                rowA.FromStation != rowB.ToStation &&
+                rowA.FromStation != "Start" && rowB.ToStation != "End"
+            
+                # Identify the new TrainId
+                new_id = "$(rowA.TrainId)_$(rowB.TrainId)"
+                
+                # --- Get Prefix from Train A ---
+                # All trips for Train A up to and including the connecting trip
+                prefix_rows = df[(df.TrainId .== rowA.TrainId) .& 
+                                (df.DepartureFromStation .<= rowA.DepartureFromStation), :]
+                
+                # --- Get Suffix from Train B ---
+                # All trips for Train B from the connecting trip onwards
+                suffix_rows = df[(df.TrainId .== rowB.TrainId) .& 
+                                (df.ArrivalToStation .>= rowB.ArrivalToStation), :]
+                
+                # Combine them
+                combined = vcat(prefix_rows, suffix_rows)
+
+                # Skip if any station appears twice in the combined from/to sequences
+                if length(unique(combined.FromStation)) != nrow(combined) ||
+                   length(unique(combined.ToStation)) != nrow(combined)
+                    continue
+                end
+                
+                
+                # Modify columns for the dummy train
+                combined.TrainCategory .= "Dummy"
+                combined.TrainId .= new_id
+                combined.Demand .= 0
+                
+                push!(new_rows_list, combined)
+            end
+        end
+    end
+
+    dummy_df = DataFrame(vcat(new_rows_list...))
+
+    if save_to_csv
+        CSV.write(filename, dummy_df)
+        println("GGV dummy data saved to $filename")
+    end
+
+    return dummy_df
 end
 
 

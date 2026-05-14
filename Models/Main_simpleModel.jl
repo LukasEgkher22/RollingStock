@@ -70,8 +70,8 @@ electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (com
 
 # define penalty parameters for coupling and decoupling (example: 100 per unit)
 coupling_penalty = 100
-end_of_day_penalty = 10000
-extra_unit_penalty = 10000
+end_of_day_penalty = 100000
+extra_unit_penalty = 100000
 
 timetable_data.Index = 1:J
 
@@ -323,8 +323,11 @@ if termination_status(model) == OPTIMAL
         write(f, "Lower Bound:    $(bound)\n")
         write(f, "Optimality Gap: $(gap)\n")
         write(f, "------------------------------------------\n")
+        write(f, "Model Parameters:\n")
+        write(f, "- v_penalty: $coupling_penalty\n")
+        write(f, "- end_of_day_penalty: $end_of_day_penalty\n")
+        write(f, "- extra_unit_penalty: $extra_unit_penalty\n")
     end
-end
     
 else
     println("No optimal solution found.")

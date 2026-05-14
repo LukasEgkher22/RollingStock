@@ -2,9 +2,9 @@
 SOLVER REPORT
 ------------------------------------------
 Status:         OPTIMAL
-Runtime:        127.13 seconds
-Objective:      3.7203786999999997e6
-Lower Bound:    3.7203786999999997e6
+Runtime:        264.35 seconds
+Objective:      3.442352099999999e6
+Lower Bound:    3.4420617e6
 Optimality Gap: N/A
 ------------------------------------------
 
