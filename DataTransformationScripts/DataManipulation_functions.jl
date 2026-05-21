@@ -148,22 +148,17 @@ Arguments:
 - `filename`: The path/name for the CSV file if saving.
 """
 function build_route_map(df_timetable::DataFrame; save_to_csv::Bool = false, filename::String = "train_routes.csv")
-    # Store actual vectors in the dictionary for programmatic use
-    route_map = Dict{Tuple{String, String}, Vector{String}}()
-    
+    # Store actual vectors in the dictionary for programmatic use    
+    route_map = Dict{Tuple{String, String}, String}()
+
     for (key, subdf) in pairs(groupby(df_timetable, [:TrainCategory, :TrainId]))
-        if isempty(subdf) continue end
+        # 1. Get the FromStation column
+        # 2. Filter out "Start"
+        # 3. Convert to string to be safe (if they aren't already)
+        stations = [string(s) for s in subdf.FromStation if s != "Start"]
         
-        # Filter for stops and extract the Station column
-        stops = filter(row -> row.Type == "stop", subdf)
-        if isempty(stops) continue end
-        
-        # Convert keys and values to strings safely
-        cat = string(key.TrainCategory)
-        id = string(key.TrainId)
-        path = Vector{String}(stops.Station)
-        
-        route_map[(cat, id)] = path
+        # 4. Join the vector of strings with a comma
+        route_map[(string(key.TrainCategory), string(key.TrainId))] = join(stations, ", ")
     end
 
     if save_to_csv
@@ -172,7 +167,7 @@ function build_route_map(df_timetable::DataFrame; save_to_csv::Bool = false, fil
             TrainCategory = [k[1] for k in keys(route_map)],
             TrainId = [k[2] for k in keys(route_map)],
             # Join the vector into a simple string for the CSV column
-            Route = [join(v, ", ") for v in values(route_map)]
+            Route = [v for v in values(route_map)]
         )
         
         CSV.write(filename, csv_df)
@@ -606,7 +601,7 @@ points or endpoints in the network—and creates synthetic rows to represent the
 - `DataFrame`: Original data with added terminal rows for each train, sorted by train ID, 
   arrival time, and station name (with "End" rows appearing last).
 """
-function add_terminal_rows(df::DataFrame; save_to_csv::Bool = false, filename::String = "merged_data_with_terminals.csv")
+function add_terminal_rows(df::DataFrame; save_to_csv::Bool = false, filename::String = "aggregated_trips_with_terminals.csv")
     # Create an empty DataFrame with the same structure to store results
     new_df = DataFrame()
     
@@ -683,7 +678,7 @@ function aggregate_train_trips(
     merged_data::DataFrame, 
     config_path::String; 
     save_to_csv::Bool = false, 
-    filename::String = "merged_data_combined.csv"
+    filename::String = "aggregated_trips.csv"
 )
     # 1. Load Excel configuration sheets
     xf = XLSX.readxlsx(config_path)
@@ -703,11 +698,18 @@ function aggregate_train_trips(
     
     combined_rows = []
     
+    
+    # NEW: Set to collect unique stations (Starts, Cuts, and Ends)
+    critical_stations = Set{String}()
+
     # 3. Group by TrainId to process each train's route
     gdf = groupby(df, :TrainId)
     
     for group in gdf
         tid = group[1, :TrainId]
+
+        # Add the very first station of this TrainId journey
+        push!(critical_stations, string(group[1, :FromStation]))
         
         # Determine the TrainSystem for this TrainId based on ranges
         # Logic: Find row where From_number <= tid <= To_number
@@ -736,6 +738,9 @@ function aggregate_train_trips(
             
             if is_cut_station || is_last_trip
                 
+                # Record the cut station or the end station
+                push!(critical_stations, string(group[i, :ToStation]))
+                
                 # Aggregate the collected segment into one row
                 push!(combined_rows, (
                     TrainCategory = current_segment[1, :TrainCategory],
@@ -761,7 +766,11 @@ function aggregate_train_trips(
     if save_to_csv
         full_filename = endswith(filename, ".csv") ? filename : filename * ".csv"
         CSV.write(full_filename, result_df)
-        println("File saved to: $full_filename")
+        
+        cutstations_out = DataFrame(Station = sort(collect(critical_stations)))
+        CSV.write("cutstations.csv", cutstations_out)
+
+        println("Files saved: $full_filename and cutstations.csv")
     end
     
     return result_df
@@ -781,12 +790,13 @@ function create_GGV_dummies(df::DataFrame; save_to_csv::Bool = false, filename::
             # - Connection point match
             # - Different Train IDs
             # - Timing: A finishes, then B starts within the window
-            # - Not a simple back-and-forth loop
+            # - Has to be both odd or even TrainIds (to avoid going back and forth between two trains)
             if rowA.ToStation == rowB.FromStation && 
                 rowA.TrainId != rowB.TrainId &&
                 0 <= (rowB.DepartureFromStation - rowA.ArrivalToStation) <= max_time_gap &&
                 rowA.FromStation != rowB.ToStation &&
-                rowA.FromStation != "Start" && rowB.ToStation != "End"
+                rowA.FromStation != "Start" && rowB.ToStation != "End" &&
+                (rowA.TrainId % 2) == (rowB.TrainId % 2)
             
                 # Identify the new TrainId
                 new_id = "$(rowA.TrainId)_$(rowB.TrainId)"
@@ -803,6 +813,12 @@ function create_GGV_dummies(df::DataFrame; save_to_csv::Bool = false, filename::
                 
                 # Combine them
                 combined = vcat(prefix_rows, suffix_rows)
+
+                # Track original TrainId
+                combined.OriginTrainId = vcat(
+                    fill("$(rowA.TrainId)", nrow(prefix_rows)),
+                    fill("$(rowB.TrainId)", nrow(suffix_rows))
+                )
 
                 # Skip if any station appears twice in the combined from/to sequences
                 if length(unique(combined.FromStation)) != nrow(combined) ||
