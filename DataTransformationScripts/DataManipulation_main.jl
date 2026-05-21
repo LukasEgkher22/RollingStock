@@ -3,7 +3,7 @@ include("DataManipulation_functions.jl")
 
 # add (empty) trips for start and end stations
 use_M_trains = true
-compile_data = true
+compile_data = false
 
 # construct file paths to XML/XLSX files
 parent_dir = dirname(dirname(@__FILE__))
@@ -33,14 +33,14 @@ if compile_data
     # adds rows for the start and end stations of each trip
     result_with_terminals = add_terminal_rows(result, save_to_csv = true, filename = "aggregated_trips_with_terminals$(filename_add).csv")
 else
-    result_with_terminals = CSV.read(normpath(joinpath(parent_dir, "DataManipulated", "aggregated_trips_with_terminals.csv")), DataFrame)
+    result_with_terminals = CSV.read(normpath(joinpath(parent_dir, "DataManipulated", "aggregated_trips.csv")), DataFrame)
 end
 
 
 create_GGV_dummies(result_with_terminals, save_to_csv = true, filename = "GGV_dummies.csv")
 
 # builds the routes DataFrame from the timetable data
-build_route_map(result_with_terminals, save_to_csv = true, filename = "train_routes_aggregated.csv")
+# build_route_map(result_with_terminals, save_to_csv = true, filename = "train_routes_aggregated.csv")
 
 # println(first(df_new, 5))
 # println(first(routes, 5))
