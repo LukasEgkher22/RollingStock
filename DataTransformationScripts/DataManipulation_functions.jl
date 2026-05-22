@@ -780,7 +780,15 @@ end
 
 function create_GGV_dummies(df::DataFrame; save_to_csv::Bool = false, filename::String = "GGV_dummies.csv")
     new_rows_list = []
-    max_time_gap = 10 # Maximum allowed time gap in minutes between the two trains for a valid GGV connection
+    max_time_gap = 20 # Maximum allowed time gap in minutes between the two trains for a valid GGV connection
+
+    # allowed combinations when odd/even does not apply
+    allowed_combinations = Set([ # FromStation, ConnectionStation, ToStation
+        ("KH/86", "FA/86", "ES/86"),
+        ("NF/86", "KH/86", "KB/86"), 
+        ("KB/86", "KK/86", "NÆ/86"),
+        ("NÆ/86", "KK/86", "KB/86")
+    ])
 
     # Iterate through potential "A" entries (the first train) and "B" entries (the second train)
     for rowA in eachrow(df)
@@ -791,15 +799,18 @@ function create_GGV_dummies(df::DataFrame; save_to_csv::Bool = false, filename::
             # - Different Train IDs
             # - Timing: A finishes, then B starts within the window
             # - No backtracking: A's FromStation should not be B's ToStation
-            # - Has to be both odd or even TrainIds (to avoid going back and forth between two trains)
+            # - Has to be both odd or even TrainIds (to avoid going back and forth between two trains - EXCEPTIONS for specific allowed combinations)
             # - Same TrainCategory (e.g., both are "EX")
             if rowA.ToStation == rowB.FromStation && 
                 rowA.TrainId != rowB.TrainId &&
                 0 <= (rowB.DepartureFromStation - rowA.ArrivalToStation) <= max_time_gap &&
                 rowA.FromStation != rowB.ToStation &&
                 rowA.FromStation != "Start" && rowB.ToStation != "End" &&
-                # (rowA.TrainId % 2) == (rowB.TrainId % 2) &&
-                rowA.TrainCategory == rowB.TrainCategory
+                (   (rowA.TrainId % 2) == (rowB.TrainId % 2) ||
+                    (string(rowA.FromStation), string(rowA.ToStation), string(rowB.ToStation)) in allowed_combinations
+                ) &&
+                rowA.TrainCategory == rowB.TrainCategory &&
+                rowA.TrainCategory != "M" # Exclude category M from GGV connections
             
                 # Identify the new TrainId
                 new_id = "$(rowA.TrainId)_$(rowB.TrainId)"
@@ -850,67 +861,57 @@ function create_GGV_dummies(df::DataFrame; save_to_csv::Bool = false, filename::
     return dummy_df
 end
 
+
 function process_timetable_with_ggv(df_timetable, df_dummies; save_to_csv::Bool = false, filename::String = "processed_timetable.csv")
-    df_t = copy(df_timetable)
-    df_d = copy(df_dummies)
+    
+    # 1. Pre-calculate unique counts
+    dummy_summary = combine(groupby(df_dummies, :OriginTrainId), 
+                            :TrainId => (x -> length(unique(x))) => :n_involved)
+    
+    # FIX: Convert keys to Integers to match the TrainId type
+    # parse(Int, string(x)) handles cases where the CSV read it as a string
+    count_map = Dict(
+        (typeof(x) <: Number ? Int(x) : parse(Int, string(x))) => n 
+        for (x, n) in zip(dummy_summary.OriginTrainId, dummy_summary.n_involved)
+    )
+    
+    # 2. Group the timetable
+    timetable_grouped = groupby(df_timetable, :TrainId)
+    
+    # 3. Collect results
+    results_list = DataFrame[]
 
-    # Detect Splits (1:n)
-    split_origins = filter(r -> r.TargetCount > 1, 
-        combine(groupby(df_d, :OriginTrainId), :TrainId => (x -> length(unique(x))) => :TargetCount)).OriginTrainId
-
-    # Detect Joins (n:1)
-    join_targets = filter(r -> r.OriginCount > 1, 
-        combine(groupby(df_d, :TrainId), :OriginTrainId => (x -> length(unique(x))) => :OriginCount)).TrainId
-
-    print(split_origins)
-    print(join_targets)
-    final_rows = []
-    processed_shared_segments = Set{String}() 
-
-    for row in eachrow(df_d)
-        origin = row.OriginTrainId
-        target = row.TrainId
+    for key in keys(timetable_grouped)
+        id = key.TrainId # This is an Integer
         
-        # Check if this row is the "Shared" part of a split or a join
-        # Split: Origin == Target and it's a split-parent (e.g., 392 before it splits)
-        # Join:  Origin == Target and it's a join-result (e.g., 392 after it merges)
-        is_shared_split = (origin == target && origin in split_origins)
-        is_shared_join  = (origin == target && target in join_targets)
+        # This will now work because id (Int) matches count_map keys (Int)
+        n_involved = get(count_map, id, 0)
 
-        if is_shared_split || is_shared_join
-            # UNIQUE check: Only add this trip once
-            trip_key = "$(target)_$(row.FromStation)_$(row.ToStation)_$(row.DepartureFromStation)"
-            if !(trip_key in processed_shared_segments)
-                new_row = Dict(names(row) .=> values(row))
-                new_row["TrainId"] = target
-                push!(final_rows, new_row)
-                push!(processed_shared_segments, trip_key)
-            end
+        if n_involved == 1
+            # Filter df_dummies (converting OriginTrainId to string for the filter if needed)
+            # Or simpler: filter by value comparison
+            rows = df_dummies[df_dummies.OriginTrainId .== string(id) .|| df_dummies.OriginTrainId .== id, :]
+            push!(results_list, rows)
+            
+        elseif n_involved >= 2
+            sub_df = DataFrame(timetable_grouped[key])
+            sub_df.OriginTrainId .= id
+            push!(results_list, sub_df)
+            
         else
-            # This is a "Branch" part (e.g., 4270_392 or 392_4270)
-            # We always keep these.
-            new_row = Dict(names(row) .=> values(row))
-            new_row["TrainId"] = target
-            push!(final_rows, new_row)
+            sub_df = DataFrame(timetable_grouped[key])
+            sub_df.OriginTrainId .= id
+            push!(results_list, sub_df)
         end
     end
 
-    # Add standard trips from timetable that aren't mentioned in dummies
-    dummy_ids = unique(vcat(df_d.TrainId, df_d.OriginTrainId))
-    for row in eachrow(df_t)
-        if !(string(row.TrainId) in dummy_ids)
-            new_row = Dict(names(row) .=> values(row))
-            new_row["TrainId"] = string(row.TrainId)
-            push!(final_rows, new_row)
-        end
-    end
+    # 4. Combine
+    result = vcat(results_list..., cols=:union)
 
     if save_to_csv
-        CSV.write(filename, DataFrame(final_rows))
+        CSV.write(filename, result)
         println("Processed timetable with GGV saved to $filename")
     end
 
-    return DataFrame(final_rows)
+    return result
 end
-
-
