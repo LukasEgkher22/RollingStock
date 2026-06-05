@@ -348,7 +348,7 @@ if termination_status(model) == OPTIMAL
         write(f, "Optimality Gap: $(gap)\n")
         write(f, "------------------------------------------\n")
         write(f, "Model Parameters:\n")
-        write(f, "- v_penalty: $coupling_penalty\n")
+        write(f, "- v_penalty: $v_penalty\n")
         write(f, "- extra_unit_penalty: $extra_unit_penalty\n")
     end
     

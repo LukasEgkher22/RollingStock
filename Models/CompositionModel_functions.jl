@@ -176,3 +176,148 @@ function get_composition_details(compositions, RS_Details, counts_per_comp)
     
     return comp_costs, comp_seats
 end
+
+"""
+Parses composition strings like "2xICA" or "ICA" into a list of types.
+"""
+function _parse_composition(comp_string)
+    s = string(comp_string)
+    # 1. Split by comma first (e.g., "1xERF, 2xICA" -> ["1xERF", " 2xICA"])
+    segments = split(s, ',')
+    
+    final_types = String[]
+    
+    for segment in segments
+        clean_segment = strip(segment) # Remove leading/trailing spaces
+        
+        if occursin('x', clean_segment)
+            # Handle "2xICA"
+            parts = split(clean_segment, 'x')
+            # The first part is the number, the second is the type
+            count_str = strip(parts[1])
+            type_name = strip(parts[2])
+            
+            count = parse(Int, count_str)
+            for _ in 1:count
+                push!(final_types, type_name)
+            end
+        elseif clean_segment != ""
+            # Handle single units like "ICA"
+            push!(final_types, clean_segment)
+        end
+    end
+    return final_types
+end
+
+
+function assign_unit_ids(df::DataFrame; file_title::String = "TrainModel")
+    timestamp = Dates.format(Dates.now(), "yyyy-mm-dd_HHMMSS")
+    summary_filename = "summary_$(file_title)_$(timestamp).txt"
+    result_filename = "UnitAssignment_$(file_title)_$(timestamp).csv"
+    
+    # Setup Data
+    working_df = sort(df, :Departure)
+    has_ggv = "GGVId" in names(df)
+    
+    # Unit Tracker: UID => (Station, AvailableTime, LastTrainId, LastGGVId)
+    # This allows us to track exactly where every physical unit is at all times.
+    unit_registry = Dict{String, NamedTuple{(:station, :time, :tid, :gid), Tuple{String, Int, String, String}}}()
+    
+    unit_counters = Dict{String, Int}()
+    unit_start_locations = Dict{String, String}()
+    assigned_rows = []
+
+    for row in eachrow(working_df)
+        tid = string(row.TrainId)
+        gid = has_ggv ? string(row.GGVId) : "-1"
+        st = string(row.FromStation)
+        dep = Int(row.Departure)
+        needed_types = _parse_composition(row.Composition)
+        
+        trip_units = String[]
+        
+        for utype in needed_types
+            # Find candidate units of this type currently at this station and ready
+            candidates = String[]
+            for (uid, status) in unit_registry
+                if startswith(uid, utype * "_") && status.station == st && status.time <= dep
+                    push!(candidates, uid)
+                end
+            end
+            
+            chosen_uid = ""
+            
+            if !isempty(candidates)
+                # PRIORITY 1: Same TrainId (Continuity)
+                idx = findfirst(u -> unit_registry[u].tid == tid, candidates)
+                
+                # PRIORITY 2: Same GGVId
+                if idx === nothing && gid != "-1"
+                    idx = findfirst(u -> unit_registry[u].gid == gid, candidates)
+                end
+                
+                # PRIORITY 3: Longest waiting unit (Earliest availability)
+                if idx === nothing
+                    sort!(candidates, by = u -> unit_registry[u].time)
+                    idx = 1
+                end
+                
+                chosen_uid = candidates[idx]
+            else
+                # PRIORITY 4: Spawn New
+                unit_counters[utype] = get(unit_counters, utype, 0) + 1
+                chosen_uid = "$(utype)_$(unit_counters[utype])"
+                unit_start_locations[chosen_uid] = st
+            end
+            
+            # Update Registry: Unit is now busy until it arrives at ToStation
+            # We temporarily set station to "TRANSIT" so it can't be picked up by 
+            # another trip starting at the same time (handling the GGV split bug)
+            unit_registry[chosen_uid] = (station="TRANSIT", time=Int(row.Arrival), tid=tid, gid=gid)
+            push!(trip_units, chosen_uid)
+        end
+        
+        # After assigning all units for this trip, finalize their arrival at the ToStation
+        for uid in trip_units
+            old_status = unit_registry[uid]
+            unit_registry[uid] = (station=string(row.ToStation), time=old_status.time, tid=tid, gid=gid)
+            
+            # Create output row
+            new_row = DataFrame(row)
+            new_row.UnitSpecificId .= uid
+            push!(assigned_rows, new_row)
+        end
+    end
+
+    # 4. Finalization
+    result_df = vcat(assigned_rows...)
+    
+    # 5. Summary Generation
+    summary_dict = Dict{String, Int}()
+    summary_io = IOBuffer()
+    println(summary_io, "--- Unit Assignment Summary: $file_title ---")
+    println(summary_io, "Generated: $timestamp")
+    
+    total_units = 0
+    for utype in sort(collect(keys(unit_counters)))
+        count = unit_counters[utype]
+        println(summary_io, "Type $utype: $count units")
+        summary_dict[utype] = count
+        total_units += count
+    end
+    println(summary_io, "TOTAL UNIQUE UNITS: $total_units")
+    println(summary_io, "\n[Initial Deployment]")
+    for uid in sort(collect(keys(unit_start_locations)))
+        println(summary_io, "$uid starts at $(unit_start_locations[uid])")
+    end
+    
+    summary_text = String(take!(summary_io))
+
+    # 6. File Writing
+    sort!(result_df, [:UnitSpecificId, :Departure])
+    CSV.write(result_filename, result_df)
+    open(summary_filename, "w") do f write(f, summary_text) end
+
+    println("Files generated: $result_filename, $summary_filename")
+    return result_df, summary_dict
+end

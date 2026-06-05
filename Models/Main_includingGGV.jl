@@ -12,7 +12,7 @@ include(joinpath(project_root, "DataTransformationScripts", "DataManipulation_fu
 include(joinpath(project_root, "Models", "CompositionModel_functions.jl"))
 
 # Read merged data from CSV
-timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "aggregated_trips_with_terminals_including_Mtrains.csv"), DataFrame)
+timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "aggregated_trips_GGVId_terminals_Mtrains.csv"), DataFrame)
 connections = build_connections(timetable_data)
 
 # Read specific sheets from Excel file
@@ -71,9 +71,8 @@ comp_costs, comp_seats = get_composition_details(compositions, RS_Data[!, ["Kilo
 electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (comp_number[c, m] > 0) for m in 1:M)]
 
 # define penalty parameters for coupling and decoupling (example: 100 per unit)
-v_penalty = 1000
-end_of_day_penalty = 10000
-extra_unit_penalty = 10000
+v_penalty = 100
+extra_unit_penalty = 100000
 
 timetable_data.Index = 1:J
 
@@ -81,6 +80,7 @@ timetable_data.Index = 1:J
 # CREATE MODEL
 # -----------------------------------------------------------
 model = Model(Gurobi.Optimizer)
+set_optimizer_attribute(model, "MIPGap", 0.005) # 0.5% optimality gap
 
 # ----------- Variables -----------
 
@@ -224,15 +224,35 @@ for j in 1:J
     end
 end
 
-# G3. Trips with the same TrainId must have the same main unit type TODO: extend this to GGVs
-for tid in TiD
-    # Get all REAL trips associated with this TrainId
-    trips_for_tid = [j for j in actual_trips if timetable_data.TrainId[j] == tid]
+# G3. Trips with the same TrainId must have the same main unit type
+# 1. Identify unique groups (either GGVId or TrainId)
+# We use a Dictionary to map each "GroupKey" to its list of trip indices
+groups = Dict{String, Vector{Int}}()
+
+for j in actual_trips
+    row = timetable_data[j, :]
     
-    if length(trips_for_tid) > 1
-        for i in 1:(length(trips_for_tid) - 1)
-            j_current = trips_for_tid[i]
-            j_next = trips_for_tid[i+1]
+    # If GGVId exists, use it as the key. 
+    # Otherwise, use the TrainId (prefixed to avoid string collisions)
+    group_key = row.GGVId != "-1" ? row.GGVId : "SOLO_$(row.TrainId)"
+    
+    if !haskey(groups, group_key)
+        groups[group_key] = Int[]
+    end
+    push!(groups[group_key], j)
+end
+
+# 2. Iterate through each group and apply the constraints
+for (key, trip_indices) in groups
+    # Sort the trips in this group chronologically by departure time
+    # This ensures u[m, current] == u[m, next] follows the physical path
+    # sort!(trip_indices, by = j -> timetable_data.DepartureFromStation[j])
+    
+    if length(trip_indices) > 1
+        for i in 1:(length(trip_indices) - 1)
+            j_current = trip_indices[i]
+            j_next = trip_indices[i+1]
+            
             for m in 1:M
                 @constraint(model, u[m, j_current] == u[m, j_next])
             end
@@ -248,12 +268,7 @@ for n in 1:N
 end
 
 # Solve the model
-start_time = Base.time()
-
 optimize!(model)
-
-total_runtime = Base.time() - start_time
-println("Solver finished with status $(termination_status(model)) after ", round(total_runtime, digits=2), " s")
 
 # Print results
 println("\n--- OPTIMIZATION RESULTS ---")
@@ -266,12 +281,14 @@ if termination_status(model) == OPTIMAL
     assignments = DataFrame(
         TripId = Int[],
         TrainCategory = String[],
-        TrainId = Int[],
+        TrainId = String[],
         FromStation = String[],
         ToStation = String[],
         Departure = Int[],
         Arrival = Int[],
         Demand = Int[],
+        Electrified = Bool[],
+        GGVId = String[],
         Composition = String[]
     )
 
@@ -283,11 +300,13 @@ if termination_status(model) == OPTIMAL
                     TripId = j,
                     TrainCategory = timetable_data.TrainCategory[j],
                     TrainId = timetable_data.TrainId[j],
-                    FromStation = timetable_data.FromStation[j],
-                    ToStation = timetable_data.ToStation[j],
+                    FromStation = timetable_data.FromStation[j],                    
                     Departure = timetable_data.DepartureFromStation[j],
+                    ToStation = timetable_data.ToStation[j],
                     Arrival = timetable_data.ArrivalToStation[j],
                     Demand = timetable_data.Demand[j],
+                    Electrified = timetable_data.Electrified[j],
+                    GGVId = timetable_data.GGVId[j],
                     Composition = string(compositions[c])
                 ))
             end
@@ -338,6 +357,12 @@ if termination_status(model) == OPTIMAL
     bound = try objective_bound(model) catch; "N/A" end
     gap = try relative_optimality_gap(model) catch; "N/A" end
 
+    km_costs_val = sum(value(y[c, j]) * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in actual_trips)
+    coupling_costs_val = sum((value(v1_happening[n]) + value(v2_happening[n])) * v_penalty for n in 1:N)
+    extra_unit_costs_val = sum(value(extra_units[m, s]) * extra_unit_penalty for m in 1:M, s in 1:S)
+    
+    format_output(val, total) = "$(round(val, digits=2)) ($(round((val / total) * 100, digits=2))%)"
+
     open(joinpath(project_root, "Results", "Summary_includingGGV_$(timestamp).txt"), "w") do f
         write(f, "------------------------------------------\n")
         write(f, "SOLVER REPORT\n")
@@ -348,6 +373,14 @@ if termination_status(model) == OPTIMAL
         write(f, "Lower Bound:    $(bound)\n")
         write(f, "Optimality Gap: $(gap)\n")
         write(f, "------------------------------------------\n")
+        write(f, "Model Parameters:\n")
+        write(f, "- v_penalty: $v_penalty\n")
+        write(f, "- extra_unit_penalty: $extra_unit_penalty\n")
+        write(f, "------------------------------------------\n")
+        write(f, "Objective Function Breakdown:\n")
+        write(f, "Kilometer Costs for Compositions: $(format_output(km_costs_val, obj_val))\n")
+        write(f, "Coupling and decoupling cost: $(format_output(coupling_costs_val, obj_val))\n")
+        write(f, "Extra unit cost: $(format_output(extra_unit_costs_val, obj_val))\n")
     end
     
 else

@@ -69,7 +69,7 @@ comp_costs, comp_seats = get_composition_details(compositions, RS_Data[!, ["Kilo
 electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (comp_number[c, m] > 0) for m in 1:M)]
 
 # define penalty parameters for coupling and decoupling (example: 100 per unit)
-coupling_penalty = 100
+v_penalty = 100
 end_of_day_penalty = 100000
 extra_unit_penalty = 100000
 
@@ -106,7 +106,7 @@ model = Model(Gurobi.Optimizer)
 # ----------- Objective -----------
 # Minimize total cost (km_costs * distance)
 @objective(model, Min, sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:J) # distance costs for each composition used
-    + sum((v1[m, n] + v2[m, n]) * coupling_penalty for m in 1:M, n in actual_connections) # make coupling/decoupling less attractive
+    + sum((v1[m, n] + v2[m, n]) * v_penalty for m in 1:M, n in actual_connections) # make coupling/decoupling less attractive
     + sum((balance_shortage[m, s] + balance_excess[m, s]) * end_of_day_penalty for m in 1:M, s in 1:S)
     + sum(extra_units[m, s] * extra_unit_penalty for m in 1:M, s in 1:S)
 )
@@ -324,7 +324,7 @@ if termination_status(model) == OPTIMAL
         write(f, "Optimality Gap: $(gap)\n")
         write(f, "------------------------------------------\n")
         write(f, "Model Parameters:\n")
-        write(f, "- v_penalty: $coupling_penalty\n")
+        write(f, "- v_penalty: $v_penalty\n")
         write(f, "- end_of_day_penalty: $end_of_day_penalty\n")
         write(f, "- extra_unit_penalty: $extra_unit_penalty\n")
     end

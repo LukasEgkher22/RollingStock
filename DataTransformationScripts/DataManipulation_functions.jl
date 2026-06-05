@@ -629,7 +629,8 @@ function add_terminal_rows(df::DataFrame; save_to_csv::Bool = false, filename::S
                 ArrivalToStation = orig.DepartureFromStation, # Use the departure time as arrival
                 Demand = 0,
                 Distance_KM = 0.0,
-                Electrified = true
+                Electrified = true,
+                GGVId = orig.GGVId
             ))
         end
         
@@ -646,7 +647,8 @@ function add_terminal_rows(df::DataFrame; save_to_csv::Bool = false, filename::S
                 ArrivalToStation = orig.ArrivalToStation,
                 Demand = 0,
                 Distance_KM = 0.0,
-                Electrified = true
+                Electrified = true,
+                GGVId = orig.GGVId
             ))
         end
         
@@ -862,6 +864,109 @@ function create_GGV_dummies(df::DataFrame; save_to_csv::Bool = false, filename::
 end
 
 
+function add_GGV_column(df::DataFrame; save_to_csv::Bool = false, filename::String = "aggregated_trips_GGVId.csv")
+    # 1. Setup and Business Rules
+    max_time_gap = 20
+    allowed_combinations = Set([
+        ("KH/86", "FA/86", "ES/86"),
+        ("NF/86", "KH/86", "KB/86"), 
+        ("KB/86", "KK/86", "NÆ/86"),
+        ("NÆ/86", "KK/86", "KB/86")
+    ])
+
+    # This set will store pairs of TrainIds that are connected
+    # Using a Set of Tuples ensures we don't store duplicates
+    edges = Set{Tuple{Any, Any}}()
+    all_train_ids = unique(df.TrainId)
+
+    # 2. Identify all valid pairwise connections (A -> B)
+    # We iterate through the dataframe to find which TrainIds "touch" each other
+    for rowA in eachrow(df)
+        for rowB in eachrow(df)
+
+            parity_id_A = get_id_part(rowA.TrainId, :last)
+            parity_id_B = get_id_part(rowB.TrainId, :first)
+
+            same_station = rowA.ToStation == rowB.FromStation
+            different_trains = rowA.TrainId != rowB.TrainId
+            same_category = rowA.TrainCategory == rowB.TrainCategory
+            departure_after_arrival = 0 <= (rowB.DepartureFromStation - rowA.ArrivalToStation) <= max_time_gap
+            no_backtracking = rowA.FromStation != rowB.ToStation
+            no_materialization = rowA.FromStation != "Start" && rowB.ToStation != "End"
+            odd_even_check = (parity_id_A % 2) == (parity_id_B % 2) || (string(rowA.FromStation), string(rowA.ToStation), string(rowB.ToStation)) in allowed_combinations
+            not_category_M = rowA.TrainCategory != "M"
+
+
+            if same_station && different_trains && departure_after_arrival && no_backtracking && no_materialization && odd_even_check && same_category && not_category_M
+                # Add a connection between these two IDs
+                push!(edges, (rowA.TrainId, rowB.TrainId))
+            end
+        end
+    end
+
+    # 3. Build an Adjacency List to find groups (Connected Components)
+    # This handles merges (A&B -> C) and splits (C -> D&E)
+    adj = Dict{Any, Set{Any}}()
+    for tid in all_train_ids
+        adj[tid] = Set{Any}()
+    end
+    for (u, v) in edges
+        push!(adj[u], v)
+        push!(adj[v], u) # Undirected graph to find the whole "web"
+    end
+
+    # 4. Traverse the graph to find groups
+    visited = Set{Any}()
+    # This dictionary will map a TrainId to its final GGV string
+    id_to_ggv_map = Dict{Any, String}()
+
+    for tid in all_train_ids
+        if !(tid in visited) && !isempty(adj[tid])
+            # Start a new group
+            component = []
+            stack = [tid]
+            push!(visited, tid)
+            
+            while !isempty(stack)
+                curr = pop!(stack)
+                push!(component, curr)
+                for neighbor in adj[curr]
+                    if !(neighbor in visited)
+                        push!(visited, neighbor)
+                        push!(stack, neighbor)
+                    end
+                end
+            end
+            
+            # Create the aggregated GGVId string (sorted for consistency)
+            sort!(component)
+            ggv_id_string = join(component, "_")
+            
+            # Map every TrainId in this group to that string
+            for member in component
+                id_to_ggv_map[member] = ggv_id_string
+            end
+        end
+    end
+
+    # 5. Create the final DataFrame
+    # We copy the original and add the GGVId column
+    result_df = copy(df)
+    
+    # We use a comprehension to fill the column: 
+    # if the TrainId is in our map, use the string, otherwise use "-1"
+    result_df.GGVId = [get(id_to_ggv_map, tid, "-1") for tid in result_df.TrainId]
+
+    # 6. Save and Return
+    if save_to_csv
+        CSV.write(filename, result_df)
+        println("Data with GGVIds saved to $filename")
+    end
+
+    return result_df
+end
+
+
 function process_timetable_with_ggv(df_timetable, df_dummies; save_to_csv::Bool = false, filename::String = "processed_timetable.csv")
     
     # 1. Pre-calculate unique counts
@@ -914,4 +1019,125 @@ function process_timetable_with_ggv(df_timetable, df_dummies; save_to_csv::Bool 
     end
 
     return result
+end
+
+function pre_merge_train_ids(df::DataFrame; save_to_csv::Bool = false, filename::String = "aggregated_trips_merged.csv")
+    max_time_gap = 20
+    allowed_combinations = Set([
+        ("KH/86", "FA/86", "ES/86"),
+        ("NF/86", "KH/86", "KB/86"), 
+        ("KB/86", "KK/86", "NÆ/86"),
+        ("NÆ/86", "KK/86", "KB/86")
+    ])
+
+    # 1. Summarize TrainId extents
+    train_extents = combine(groupby(df, :TrainId)) do subdf
+        sdf = sort(subdf, :DepartureFromStation)
+        first_trip = sdf[1, :]
+        last_trip = sdf[end, :]
+        return (
+            LastFrom = last_trip.FromStation,
+            LastTo = last_trip.ToStation,
+            LastArrival = last_trip.ArrivalToStation,
+            FirstFrom = first_trip.FromStation,
+            FirstTo = first_trip.ToStation,
+            FirstDeparture = first_trip.DepartureFromStation,
+            Category = first_trip.TrainCategory,
+            Parity = first_trip.TrainId % 2
+        )
+    end
+
+    # 2. Find ALL valid potential connections
+    # We store them to count degrees (how many ins/outs each train has)
+    all_possible_edges = []
+    out_degree = Dict{Any, Int}()
+    in_degree = Dict{Any, Int}()
+    
+    # Initialize degrees
+    for tid in train_extents.TrainId
+        out_degree[tid] = 0
+        in_degree[tid] = 0
+    end
+
+    for rowA in eachrow(train_extents)
+        for rowB in eachrow(train_extents)
+            if rowA.TrainId == rowB.TrainId continue end
+            
+            # Use your business logic
+            if rowA.LastTo == rowB.FirstFrom &&
+               0 <= (rowB.FirstDeparture - rowA.LastArrival) <= max_time_gap &&
+               rowA.Category == rowB.Category && rowA.Category != "M" &&
+               (   rowA.Parity == rowB.Parity 
+                    # || (string(rowA.LastFrom), string(rowA.LastTo), string(rowB.FirstTo)) in allowed_combinations
+               )
+                
+                push!(all_possible_edges, (src=rowA.TrainId, dst=rowB.TrainId))
+                out_degree[rowA.TrainId] += 1
+                in_degree[rowB.TrainId] += 1
+            end
+        end
+    end
+
+    # 3. Identify "Strict" links
+    # A link A -> B is strict ONLY IF A has 1 outgoing AND B has 1 incoming
+    strict_links = Dict{Any, Any}()
+    for edge in all_possible_edges
+        if out_degree[edge.src] == 1 && in_degree[edge.dst] == 1
+            strict_links[edge.src] = edge.dst
+        end
+    end
+
+    # 4. Build the chains (Unlimited length for strict segments)
+    final_id_map = Dict{Any, String}()
+    processed = Set{Any}()
+
+    for tid in train_extents.TrainId
+        tid in processed && continue
+        
+        # Find the start of this strict chain segment
+        curr = tid
+        # Reverse lookup to find the head
+        reverse_strict = Dict(v => k for (k, v) in strict_links)
+        while haskey(reverse_strict, curr)
+            curr = reverse_strict[curr]
+        end
+        
+        # Follow the strict chain forward
+        head = curr
+        chain = [head]
+        while haskey(strict_links, curr)
+            curr = strict_links[curr]
+            push!(chain, curr)
+        end
+        
+        # Map all members to the new joined ID
+        # Only create a joined string if the chain actually contains more than 1 train
+        new_id = length(chain) > 1 ? join(chain, "_") : string(head)
+        for member in chain
+            final_id_map[member] = new_id
+            push!(processed, member)
+        end
+    end
+
+    # 5. Overwrite the TrainId in the original DataFrame and sort it for better readability
+    df.TrainId = [get(final_id_map, tid, string(tid)) for tid in df.TrainId]
+    df = sort(df, [:TrainId, :DepartureFromStation])
+
+    if save_to_csv
+        CSV.write(filename, df)
+        println("Pre-merged TrainIds saved to $filename")
+    end
+    
+    return df
+end
+
+# Helper function to get the numeric ID from a potentially merged string
+function get_id_part(id_val, position::Symbol)
+    s = string(id_val)
+    parts = split(s, '_')
+    if position == :first
+        return parse(Int, parts[1])
+    elseif position == :last
+        return parse(Int, parts[end])
+    end
 end
