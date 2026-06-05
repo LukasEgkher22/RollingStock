@@ -56,6 +56,23 @@ function get_smaller_df(to_explore, bad_stations, timetable_data, connections)
     return new_timetable_data, new_connections
 end
 
+
+"""
+Generates a nested dictionary representing the count of each unit type within every composition.
+
+This function builds a lookup structure that maps composition indices to a sub-dictionary 
+of unit type indices and their respective counts. It parses composition strings by 
+splitting them (using the "-" delimiter) and specifically handles the "empty" unit 
+identifier by assigning it a count of zero.
+
+# Arguments
+- `compositions::Vector{String}`: A vector of composition strings (e.g., ["ICA-ERF", "ERF"])
+- `unit_names::Vector{String}`: A vector of available unit type names
+
+# Returns
+- `Dict{Int, Dict{Int, Int}}`: A nested dictionary where the outer key is the composition 
+  index and the inner key is the unit type index, mapping to the integer count of that unit.
+"""
 function get_comp_counts(compositions, unit_names)
   # This creates a nested lookup: counts_per_comp["ICA-ERF"]["ICA"] = 1
     return Dict(
@@ -65,11 +82,22 @@ function get_comp_counts(compositions, unit_names)
 end
 
 """
-    get_normalized_compositions(compositions_raw, unit_names)
+Identifies unique train compositions and maps them to unit count signatures.
 
-Returns:
-1. `compositions`: A Vector of unique, normalized composition names (String).
-2. `counts_matrix`: A 2D Matrix{Int} where [c, m] is the count of unit type m in composition c.
+This function aggregates raw composition strings into a set of unique, normalized definitions. 
+It creates a "signature" (a vector of counts) for every unique combination of unit types, 
+ensuring that different orderings of the same units are treated as the same composition. 
+It also handles "empty" states and produces a matrix for mathematical modeling.
+
+# Arguments
+- `compositions_raw::Vector{String}`: A list of raw composition strings (e.g., ["ICA-ERF", "ERF-ICA"])
+- `unit_names::Vector{String}`: A list of all possible unit type identifiers
+
+# Returns
+- `compositions::Vector{String}`: A sorted list of unique, pretty-formatted composition 
+  labels (e.g., ["1xERF, 1xICA"])
+- `counts_matrix::Matrix{Int}`: A 2D matrix where `counts_matrix[c, m]` is the number of 
+  units of type `m` present in composition `c`
 """
 function get_normalized_compositions(compositions_raw, unit_names)
     # 1. Use a Dictionary to store unique unit-count vectors as keys
@@ -116,6 +144,24 @@ function get_normalized_compositions(compositions_raw, unit_names)
     return compositions, counts_matrix
 end
 
+"""
+Computes the required coupling and decoupling actions for transitions between compositions.
+
+This function determines the net change in unit counts for each rolling stock type when 
+transitioning from one composition state to another. It is used to model the operational 
+logic of adding (coupling) or removing (decoupling) units at stations.
+
+# Arguments
+- `counts_per_comp::Matrix{Int}`: The signature matrix from `get_normalized_compositions` 
+  mapping composition indices to unit counts
+- `unit_names::Vector{String}`: A list of all possible unit type identifiers
+
+# Returns
+- `coupled::Dict{Tuple{Int, Int, Int}, Int}`: A dictionary mapping `(unit_idx, from_comp, to_comp)` 
+  to the number of units added during the transition
+- `decoupled::Dict{Tuple{Int, Int, Int}, Int}`: A dictionary mapping `(unit_idx, from_comp, to_comp)` 
+  to the number of units removed during the transition
+"""
 function get_coupling_matrices(counts_per_comp, unit_names)
     # Initialize the dictionaries for results
     # Key format: (unit_name, composition_from, composition_to)
@@ -177,8 +223,21 @@ function get_composition_details(compositions, RS_Details, counts_per_comp)
     return comp_costs, comp_seats
 end
 
+
 """
-Parses composition strings like "2xICA" or "ICA" into a list of types.
+Parses composition strings into a flat list of individual rolling stock unit types.
+
+This helper function deconstructs encoded strings (e.g., "2xICA" or "1xERF, 2xICA") into 
+a vector of strings. It handles multipliers specified with 'x' and comma-separated 
+multiple unit types.
+
+# Arguments
+- `comp_string`: A string or object convertible to a string representing the train 
+  configuration (e.g., "2xICA, 1xERF")
+
+# Returns
+- `final_types::Vector{String}`: An ordered list of unit type names, where each 
+  physical unit is represented as an individual entry (e.g., ["ICA", "ICA", "ERF"])
 """
 function _parse_composition(comp_string)
     s = string(comp_string)
@@ -202,7 +261,6 @@ function _parse_composition(comp_string)
                 push!(final_types, type_name)
             end
         elseif clean_segment != ""
-            # Handle single units like "ICA"
             push!(final_types, clean_segment)
         end
     end
@@ -210,9 +268,29 @@ function _parse_composition(comp_string)
 end
 
 
+"""
+Simulates the assignment of physical rolling stock units to scheduled trips.
+
+This function tracks the movement and availability of individual units across a 
+timetable. For each trip, it attempts to assign existing units currently at the 
+departure station, prioritizing continuity (same TrainId or GGVId) and turnover 
+time. If no units are available, it "spawns" a new unit. The function generates 
+an audit trail of unit movements and saves the results to CSV and TXT files.
+
+# Arguments
+- `df::DataFrame`: The schedule data containing at minimum: `Departure`, `Arrival`, 
+  `FromStation`, `ToStation`, `Composition`, and `TrainId`.
+- `file_title::String`: (Optional) A prefix for the generated output filenames.
+
+# Returns
+- `result_df::DataFrame`: A long-format DataFrame where each row represents a specific 
+  physical unit's assignment to a trip, including a unique `UnitSpecificId`.
+- `summary_dict::Dict{String, Int}`: A dictionary mapping unit types to the total 
+  number of unique physical units required to service the entire schedule.
+"""
 function assign_unit_ids(df::DataFrame; file_title::String = "TrainModel")
     timestamp = Dates.format(Dates.now(), "yyyy-mm-dd_HHMMSS")
-    summary_filename = "summary_$(file_title)_$(timestamp).txt"
+    summary_filename = "UnitSummary_$(file_title)_$(timestamp).txt"
     result_filename = "UnitAssignment_$(file_title)_$(timestamp).csv"
     
     # Setup Data
@@ -315,8 +393,10 @@ function assign_unit_ids(df::DataFrame; file_title::String = "TrainModel")
 
     # 6. File Writing
     sort!(result_df, [:UnitSpecificId, :Departure])
-    CSV.write(result_filename, result_df)
-    open(summary_filename, "w") do f write(f, summary_text) end
+    CSV.write(joinpath("Results", result_filename), result_df)
+    open(joinpath("Results", summary_filename), "w") do f
+        write(f, summary_text)
+    end
 
     println("Files generated: $result_filename, $summary_filename")
     return result_df, summary_dict

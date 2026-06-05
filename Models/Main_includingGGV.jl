@@ -188,8 +188,7 @@ for j in 1:J
 end
 
 # E. Global Station Balance (Type-based overnight requirement)
-for m in 1:M, s in 1:S  # coupled + excess == decoupled + shortage
-    #@constraint(model, sum(v1[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_excess[m, s] == sum(v2[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) + balance_shortage[m, s])
+for m in 1:M, s in 1:S  # coupled == decoupled
     @constraint(model, sum(v1[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) == sum(v2[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]))
 end
 
@@ -321,8 +320,8 @@ if termination_status(model) == OPTIMAL
         append!(ordered_assignments, sorted_g)
     end
 
-    timestamp = Dates.format(Dates.now(), "yyyy-mm-dd_HH-MM-SS")
-    CSV.write(joinpath(project_root, "Results", "CompAssignments_includingGGV_$(timestamp).csv"), ordered_assignments)
+    timestamp = Dates.format(Dates.now(), "yyyy-mm-dd_HHMMSS")
+    CSV.write(joinpath(project_root, "Results", "CompAssignments_GGV_$(timestamp).csv"), ordered_assignments)
 
     balance_df = DataFrame(
         Reason = String[],
@@ -345,7 +344,7 @@ if termination_status(model) == OPTIMAL
     end
 
     if !isempty(balance_df)
-        CSV.write(joinpath(project_root, "Results", "BalanceIssues_includingGGV_$(timestamp).csv"), balance_df)
+        CSV.write(joinpath(project_root, "Results", "BalanceIssues_GGV_$(timestamp).csv"), balance_df)
     else
         println("No balance issues or extra units needed at the end of the day.")
     end
@@ -363,7 +362,7 @@ if termination_status(model) == OPTIMAL
     
     format_output(val, total) = "$(round(val, digits=2)) ($(round((val / total) * 100, digits=2))%)"
 
-    open(joinpath(project_root, "Results", "Summary_includingGGV_$(timestamp).txt"), "w") do f
+    open(joinpath(project_root, "Results", "Summary_GGV_$(timestamp).txt"), "w") do f
         write(f, "------------------------------------------\n")
         write(f, "SOLVER REPORT\n")
         write(f, "------------------------------------------\n")

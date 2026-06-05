@@ -4,6 +4,7 @@ include("DataManipulation_functions.jl")
 # add (empty) trips for start and end stations
 use_M_trains = true
 compile_data = true
+additional_M_trains = true
 
 # construct file paths to XML/XLSX files
 parent_dir = dirname(dirname(@__FILE__))
@@ -12,6 +13,7 @@ file_path_timetable = normpath(joinpath(parent_dir, "Data", "DLK_Timetable.xml")
 file_path_infrastructure = normpath(joinpath(parent_dir, "Data", "dlkinfra_IF-26_20260121081306.xml"))
 file_path_station_abbrev = normpath(joinpath(parent_dir, "Data", "Station Abbreviation.xlsx"))
 file_path_BASEDAY = normpath(joinpath(parent_dir, "Data", "Base Day TUE.xlsx"))
+file_path_additional_trips = normpath(joinpath(parent_dir, "DataManipulated", "additional_M_trains.csv"))
 
 # read in the data and save to CSV for easier access in the future
 df_passenger = parse_passenger_xml(file_path_passenger)
@@ -23,30 +25,31 @@ stations_abbrev = extract_station_names(file_path_station_abbrev)
 # MANIPULATION of data based on needs
 # -----------
 
-filename_add = use_M_trains ? "_Mtrains" : ""
 if compile_data
     # creates the main DataFrame with all relevant information for the model
-    df_new = merge_data(df_timetable, df_passenger, df_infra, add_Mtrains = use_M_trains, save_to_csv = true, filename = "merged_data$(filename_add).csv")
+    df_new = merge_data(df_timetable, df_passenger, df_infra, add_Mtrains = use_M_trains, save_to_csv = true, filename = "merged_data.csv")
 
     # shortens the DataFrame by only keeping stations where composition changes are possible and the start/end stations
-    result = aggregate_train_trips(df_new, file_path_BASEDAY, save_to_csv = true, filename = "aggregated_trips$(filename_add).csv")
+    result = aggregate_train_trips(df_new, file_path_BASEDAY, save_to_csv = true, filename = "aggregated_trips.csv")
 
-    result = pre_merge_train_ids(result, save_to_csv = true, filename = "aggregated_trips_merged$(filename_add).csv")
+    if additional_M_trains
+        result = add_additional_M_trains(result, file_path_additional_trips)
+    end
 
 else
-    result = CSV.read(normpath(joinpath(parent_dir, "DataManipulated", "aggregated_trips$(filename_add).csv")), DataFrame)
+    result = CSV.read(normpath(joinpath(parent_dir, "DataManipulated", "aggregated_trips.csv")), DataFrame)
 end
 
 
-# dummies = create_GGV_dummies(result, save_to_csv = true, filename = "GGV_dummies.csv")
-ggv = add_GGV_column(result, save_to_csv = true, filename = "aggregated_trips_GGVId$(filename_add).csv")
-#ggv = process_timetable_with_ggv(result, dummies, save_to_csv = true, filename = "aggregated_trips_with_GGV$(filename_add).csv")
-terminals = add_terminal_rows(ggv, save_to_csv = true, filename = "aggregated_trips_GGVId_terminals$(filename_add).csv")
+# add terminals
+terminals = add_terminal_rows(result, save_to_csv = true, filename = "aggregated_trips_terminals.csv")
+
+# add ggv and then terminals
+result_new = pre_merge_train_ids(result, save_to_csv = true, filename = "aggregated_trips_merged.csv")
+ggv = add_GGV_column(result_new, save_to_csv = true, filename = "aggregated_trips_merged_GGV.csv")
+ggv_terminals = add_terminal_rows(ggv, save_to_csv = true, filename = "aggregated_trips_merged_GGV_terminals.csv")
 
 # builds the routes DataFrame from the timetable data
-# build_route_map(result_with_terminals, save_to_csv = true, filename = "train_routes_aggregated.csv")
+# route = build_route_map(terminals, save_to_csv = true, filename = "train_routes_aggregated.csv")
 
-# println(first(df_new, 5))
-# println(first(routes, 5))
-# println(first(df_connections, 5))
 

@@ -1,0 +1,2 @@
+TrainCategory,TrainId,FromStation,DepartureFromStation,ToStation,ArrivalToStation,Demand,Distance_KM,Electrified
+M,999991,KD/86,1800,FA/86,1800,0,19.9,true

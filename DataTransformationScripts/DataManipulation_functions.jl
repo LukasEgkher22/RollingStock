@@ -382,6 +382,7 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
 end
 
 """
+
 Define connecitons based on consecutive trips in the timetable
 
 # Arguments
@@ -604,6 +605,7 @@ points or endpoints in the network—and creates synthetic rows to represent the
 function add_terminal_rows(df::DataFrame; save_to_csv::Bool = false, filename::String = "aggregated_trips_with_terminals.csv")
     # Create an empty DataFrame with the same structure to store results
     new_df = DataFrame()
+    has_GGVId = hasproperty(df, :GGVId)
     
     # Process each train individually
     for sub_df in groupby(df, :TrainId)
@@ -620,7 +622,8 @@ function add_terminal_rows(df::DataFrame; save_to_csv::Bool = false, filename::S
         for s in starts
             # Find the original row where this station first appears
             orig = sub_df[findfirst(==(s), sub_df.FromStation), :]
-            push!(train_terminal_rows, (
+
+            row = (
                 TrainCategory = orig.TrainCategory,
                 TrainId = orig.TrainId,
                 FromStation = "Start",
@@ -629,29 +632,41 @@ function add_terminal_rows(df::DataFrame; save_to_csv::Bool = false, filename::S
                 ArrivalToStation = orig.DepartureFromStation, # Use the departure time as arrival
                 Demand = 0,
                 Distance_KM = 0.0,
-                Electrified = true,
-                GGVId = orig.GGVId
-            ))
-        end
+                Electrified = true
+            )
+
+            if has_GGVId
+                row = merge(row, (GGVId = orig.GGVId,))
+            end
+
+            push!(train_terminal_rows, row)
+         end
         
         # Build "End" rows
         for e in ends
             # Find the original row where this station last appears
             orig = sub_df[findfirst(==(e), sub_df.ToStation), :]
-            push!(train_terminal_rows, (
+
+            # 1. Define the base fields
+            row = (
                 TrainCategory = orig.TrainCategory,
                 TrainId = orig.TrainId,
                 FromStation = e,
-                DepartureFromStation = orig.ArrivalToStation, # Use the arrival time as departure
+                DepartureFromStation = orig.ArrivalToStation,
                 ToStation = "End",
                 ArrivalToStation = orig.ArrivalToStation,
                 Demand = 0,
                 Distance_KM = 0.0,
-                Electrified = true,
-                GGVId = orig.GGVId
-            ))
+                Electrified = true
+            )
+
+            # 2. Merge GGVId only if it exists
+            if has_GGVId
+                row = merge(row, (GGVId = orig.GGVId,))
+            end
+
+            push!(train_terminal_rows, row)
         end
-        
         # Combine the new terminal rows with the original data for this train
         append!(new_df, vcat(sub_df, train_terminal_rows))
     end
@@ -674,14 +689,24 @@ function add_terminal_rows(df::DataFrame; save_to_csv::Bool = false, filename::S
 end
 
 """
-Aggregates train trips based on TrainId and specific cut stations defined in an Excel config.
+Aggregates individual trip legs into logical segments based on operational cutpoints.
+
+This function groups train trips by their `TrainId` and merges sequential rows into a single 
+aggregated trip. It uses an external configuration file to determine "cut stations" where 
+a journey should be split (e.g., major terminals). It also calculates the maximum demand 
+and total distance for the resulting segments.
+
+# Arguments
+- `merged_data::DataFrame`: The raw trip data containing individual legs.
+- `config_path::String`: Path to an Excel file with "Trip cutpoints" and "Train system mapping".
+- `save_to_csv::Bool`: If true, saves the result and a list of critical stations to CSV.
+- `filename::String`: The name for the exported aggregated trip file.
+
+# Returns
+- `result_df::DataFrame`: A DataFrame where each row represents a logical trip segment 
+  from a starting station to a cutpoint or final destination.
 """
-function aggregate_train_trips(
-    merged_data::DataFrame, 
-    config_path::String; 
-    save_to_csv::Bool = false, 
-    filename::String = "aggregated_trips.csv"
-)
+function aggregate_train_trips(merged_data::DataFrame, config_path::String; save_to_csv::Bool = false, filename::String = "aggregated_trips.csv")
     # 1. Load Excel configuration sheets
     xf = XLSX.readxlsx(config_path)
     
@@ -778,95 +803,26 @@ function aggregate_train_trips(
     return result_df
 end
 
+"""
+Identifies and labels groups of connected trains (GGVs) based on shared station transitions.
 
+This function identifies "webs" of connectivity where different TrainIds meet, split, or 
+merge at a station within a specific time window. It applies business rules (such as 
+parity checks and station exclusions) to determine valid connections and assigns a 
+unique `GGVId` string to all participating TrainIds in a connected component.
 
-function create_GGV_dummies(df::DataFrame; save_to_csv::Bool = false, filename::String = "GGV_dummies.csv")
-    new_rows_list = []
-    max_time_gap = 20 # Maximum allowed time gap in minutes between the two trains for a valid GGV connection
+# Arguments
+- `df::DataFrame`: The aggregated trip data.
+- `save_to_csv::Bool`: If true, exports the data with the new GGVId column.
+- `filename::String`: The name for the exported CSV file.
+- `max_time_gap::Int`: The maximum allowed time gap (in minutes) between arrival and departure for a valid connection.
 
-    # allowed combinations when odd/even does not apply
-    allowed_combinations = Set([ # FromStation, ConnectionStation, ToStation
-        ("KH/86", "FA/86", "ES/86"),
-        ("NF/86", "KH/86", "KB/86"), 
-        ("KB/86", "KK/86", "NÆ/86"),
-        ("NÆ/86", "KK/86", "KB/86")
-    ])
-
-    # Iterate through potential "A" entries (the first train) and "B" entries (the second train)
-    for rowA in eachrow(df)
-        for rowB in eachrow(df)
-            
-            # Criteria checks:
-            # - Connection point match
-            # - Different Train IDs
-            # - Timing: A finishes, then B starts within the window
-            # - No backtracking: A's FromStation should not be B's ToStation
-            # - Has to be both odd or even TrainIds (to avoid going back and forth between two trains - EXCEPTIONS for specific allowed combinations)
-            # - Same TrainCategory (e.g., both are "EX")
-            if rowA.ToStation == rowB.FromStation && 
-                rowA.TrainId != rowB.TrainId &&
-                0 <= (rowB.DepartureFromStation - rowA.ArrivalToStation) <= max_time_gap &&
-                rowA.FromStation != rowB.ToStation &&
-                rowA.FromStation != "Start" && rowB.ToStation != "End" &&
-                (   (rowA.TrainId % 2) == (rowB.TrainId % 2) ||
-                    (string(rowA.FromStation), string(rowA.ToStation), string(rowB.ToStation)) in allowed_combinations
-                ) &&
-                rowA.TrainCategory == rowB.TrainCategory &&
-                rowA.TrainCategory != "M" # Exclude category M from GGV connections
-            
-                # Identify the new TrainId
-                new_id = "$(rowA.TrainId)_$(rowB.TrainId)"
-                
-                # --- Get Prefix from Train A ---
-                # All trips for Train A up to and including the connecting trip
-                prefix_rows = df[(df.TrainId .== rowA.TrainId) .& 
-                                (df.DepartureFromStation .<= rowA.DepartureFromStation), :]
-                
-                # --- Get Suffix from Train B ---
-                # All trips for Train B from the connecting trip onwards
-                suffix_rows = df[(df.TrainId .== rowB.TrainId) .& 
-                                (df.ArrivalToStation .>= rowB.ArrivalToStation), :]
-                
-                # Combine them
-                combined = vcat(prefix_rows, suffix_rows)
-
-                # Track original TrainId
-                combined.OriginTrainId = vcat(
-                    fill("$(rowA.TrainId)", nrow(prefix_rows)),
-                    fill("$(rowB.TrainId)", nrow(suffix_rows))
-                )
-
-                # Skip if any station appears twice in the combined from/to sequences
-                if length(unique(combined.FromStation)) != nrow(combined) ||
-                   length(unique(combined.ToStation)) != nrow(combined)
-                    continue
-                end
-                
-                
-                # Modify columns for the dummy train
-                # combined.TrainCategory .= "Dummy"
-                combined.TrainId .= new_id
-                # combined.Demand .= 0
-                
-                push!(new_rows_list, combined)
-            end
-        end
-    end
-
-    dummy_df = DataFrame(vcat(new_rows_list...))
-
-    if save_to_csv
-        CSV.write(filename, dummy_df)
-        println("GGV dummy data saved to $filename")
-    end
-
-    return dummy_df
-end
-
-
-function add_GGV_column(df::DataFrame; save_to_csv::Bool = false, filename::String = "aggregated_trips_GGVId.csv")
+# Returns
+- `result_df::DataFrame`: The input DataFrame with an added `GGVId` column representing 
+  the interconnected train groups.
+"""
+function add_GGV_column(df::DataFrame; save_to_csv::Bool = false, filename::String = "aggregated_trips_GGVId.csv", max_time_gap::Int = 20)
     # 1. Setup and Business Rules
-    max_time_gap = 20
     allowed_combinations = Set([
         ("KH/86", "FA/86", "ES/86"),
         ("NF/86", "KH/86", "KB/86"), 
@@ -966,63 +922,24 @@ function add_GGV_column(df::DataFrame; save_to_csv::Bool = false, filename::Stri
     return result_df
 end
 
+"""
+Merges sequential TrainIds into a single identifier if they have a strict 1-to-1 relationship.
 
-function process_timetable_with_ggv(df_timetable, df_dummies; save_to_csv::Bool = false, filename::String = "processed_timetable.csv")
-    
-    # 1. Pre-calculate unique counts
-    dummy_summary = combine(groupby(df_dummies, :OriginTrainId), 
-                            :TrainId => (x -> length(unique(x))) => :n_involved)
-    
-    # FIX: Convert keys to Integers to match the TrainId type
-    # parse(Int, string(x)) handles cases where the CSV read it as a string
-    count_map = Dict(
-        (typeof(x) <: Number ? Int(x) : parse(Int, string(x))) => n 
-        for (x, n) in zip(dummy_summary.OriginTrainId, dummy_summary.n_involved)
-    )
-    
-    # 2. Group the timetable
-    timetable_grouped = groupby(df_timetable, :TrainId)
-    
-    # 3. Collect results
-    results_list = DataFrame[]
+This function performs a "strict merge" where Train A is renamed to include Train B only 
+if Train A flows exclusively into Train B, and Train B arrives exclusively from Train A. 
+This simplifies the schedule by treating continuous physical movements as a single 
+logical entity.
 
-    for key in keys(timetable_grouped)
-        id = key.TrainId # This is an Integer
-        
-        # This will now work because id (Int) matches count_map keys (Int)
-        n_involved = get(count_map, id, 0)
+# Arguments
+- `df::DataFrame`: The trip data containing potentially separate but sequential TrainIds.
+- `save_to_csv::Bool`: If true, exports the merged ID results to CSV.
+- `filename::String`: The name for the exported CSV file.
+- `max_time_gap::Int`: The maximum time gap (in minutes) allowed between consecutive trips.
 
-        if n_involved == 1
-            # Filter df_dummies (converting OriginTrainId to string for the filter if needed)
-            # Or simpler: filter by value comparison
-            rows = df_dummies[df_dummies.OriginTrainId .== string(id) .|| df_dummies.OriginTrainId .== id, :]
-            push!(results_list, rows)
-            
-        elseif n_involved >= 2
-            sub_df = DataFrame(timetable_grouped[key])
-            sub_df.OriginTrainId .= id
-            push!(results_list, sub_df)
-            
-        else
-            sub_df = DataFrame(timetable_grouped[key])
-            sub_df.OriginTrainId .= id
-            push!(results_list, sub_df)
-        end
-    end
-
-    # 4. Combine
-    result = vcat(results_list..., cols=:union)
-
-    if save_to_csv
-        CSV.write(filename, result)
-        println("Processed timetable with GGV saved to $filename")
-    end
-
-    return result
-end
-
-function pre_merge_train_ids(df::DataFrame; save_to_csv::Bool = false, filename::String = "aggregated_trips_merged.csv")
-    max_time_gap = 20
+# Returns
+- `df::DataFrame`: The DataFrame with updated `TrainId` strings (e.g., "101_102").
+"""
+function pre_merge_train_ids(df::DataFrame; save_to_csv::Bool = false, filename::String = "aggregated_trips_merged.csv", max_time_gap::Int = 20)
     allowed_combinations = Set([
         ("KH/86", "FA/86", "ES/86"),
         ("NF/86", "KH/86", "KB/86"), 
@@ -1140,4 +1057,39 @@ function get_id_part(id_val, position::Symbol)
     elseif position == :last
         return parse(Int, parts[end])
     end
+end
+
+
+function add_additional_M_trains(result_new::DataFrame, file_path_additional_trips::String)
+    additional_trips = CSV.read(file_path_additional_trips, DataFrame)
+    for col in names(additional_trips)
+        target_type = eltype(result_new[!, col])
+        current_type = eltype(additional_trips[!, col])
+        
+        if current_type != target_type
+            println("Column $col: Converting $current_type to $target_type.")
+
+            if target_type <: AbstractString
+                # CASE 1: Target is String (use string.() instead of convert)
+                additional_trips[!, col] = string.(additional_trips[!, col])
+                
+            elseif current_type <: AbstractString && target_type <: Number
+                # CASE 2: Source is String, Target is Number (use parse)
+                additional_trips[!, col] = [
+                    isnothing(x) || x == "" || x == "missing" ? 0 : parse(target_type, string(x)) 
+                    for x in additional_trips[!, col]
+                ]
+                
+            else
+                # CASE 3: Standard numeric conversions (e.g., Int to Float)
+                try
+                    additional_trips[!, col] = convert.(target_type, additional_trips[!, col])
+                catch e
+                    @warn "Could not convert $col to $target_type automatically. Skipping."
+                end
+            end
+        end
+    end
+    result_new = vcat(result_new, additional_trips)
+    return result_new
 end

@@ -12,7 +12,7 @@ include(joinpath(project_root, "DataTransformationScripts", "DataManipulation_fu
 include(joinpath(project_root, "Models", "CompositionModel_functions.jl"))
 
 # Read merged data from CSV
-timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "aggregated_trips_with_terminals.csv"), DataFrame)
+timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "aggregated_trips_terminals.csv"), DataFrame)
 connections = build_connections(timetable_data)
 
 # Read specific sheets from Excel file
@@ -72,6 +72,7 @@ electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (com
 v_penalty = 100
 end_of_day_penalty = 100000
 extra_unit_penalty = 100000
+km_buff = 0.1 # multiplier for km costs to make them more comparable to the penalties
 
 timetable_data.Index = 1:J
 
@@ -79,6 +80,7 @@ timetable_data.Index = 1:J
 # CREATE MODEL
 # -----------------------------------------------------------
 model = Model(Gurobi.Optimizer)
+set_optimizer_attribute(model, "MIPGap", 0.005) # 0.5% optimality gap
 
 # ----------- Variables -----------
 
@@ -91,6 +93,9 @@ model = Model(Gurobi.Optimizer)
 # v1[m, n] defines how many units of type m are coupled in connection n, v2 for decoupling
 @variable(model, v1[m=1:M, n=1:N] >= 0)
 @variable(model, v2[m=1:M, n=1:N] >= 0)
+
+@variable(model, v1_happening[n=1:N], Bin)
+@variable(model, v2_happening[n=1:N], Bin)
 
 # storage[m, n] - non-negative number of units of type m stored at the station of connection n (after coupling and decoupling)
 @variable(model, storage[m=1:M, n=1:N] >= 0)
@@ -105,8 +110,8 @@ model = Model(Gurobi.Optimizer)
 
 # ----------- Objective -----------
 # Minimize total cost (km_costs * distance)
-@objective(model, Min, sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:J) # distance costs for each composition used
-    + sum((v1[m, n] + v2[m, n]) * v_penalty for m in 1:M, n in actual_connections) # make coupling/decoupling less attractive
+@objective(model, Min, km_buff * sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:J) # distance costs for each composition used
+    + sum((v1_happening[n] + v2_happening[n]) * v_penalty for n in actual_connections) # make coupling/decoupling less attractive
     + sum((balance_shortage[m, s] + balance_excess[m, s]) * end_of_day_penalty for m in 1:M, s in 1:S)
     + sum(extra_units[m, s] * extra_unit_penalty for m in 1:M, s in 1:S)
 )
@@ -120,6 +125,9 @@ for j in 1:J
                 fix(y[c, j], 0; force=true)
             end
         end
+    elseif timetable_data.TrainCategory[j] == "M"
+        continue
+        # M trains can be left empty or assigned a composition
     else
         fix(y[empty_comp_idx, j], 0; force=true)
     end
@@ -204,13 +212,15 @@ for n in 1:N
     end
 end
 
+# H. Define v_happening variables
+for n in 1:N
+    @constraint(model, v1_happening[n]*5 >= sum(v1[m, n] for m in 1:M))
+    @constraint(model, v2_happening[n]*5 >= sum(v2[m, n] for m in 1:M))
+    @constraint(model, v1_happening[n] + v2_happening[n] <= 1) # only coupling or decoupling can happen, not both
+end
+
 # Solve the model
-start_time = Base.time()
-
 optimize!(model)
-
-total_runtime = Base.time() - start_time
-println("Solver finished with status $(termination_status(model)) after ", round(total_runtime, digits=2), " s")
 
 # Print results
 println("\n--- OPTIMIZATION RESULTS ---")
@@ -259,8 +269,8 @@ if termination_status(model) == OPTIMAL
         append!(ordered_assignments, sorted_g)
     end
 
-    timestamp = Dates.format(Dates.now(), "yyyy-mm-dd_HH-MM-SS")
-    CSV.write(joinpath(project_root, "Results", "CompAssignments_simpleModel_$(timestamp).csv"), ordered_assignments)
+    timestamp = Dates.format(Dates.now(), "yyyy-mm-dd_HHMMSS")
+    CSV.write(joinpath(project_root, "Results", "CompAssignments_SimpleModel_$(timestamp).csv"), ordered_assignments)
 
     balance_df = DataFrame(
         Reason = String[],
@@ -301,11 +311,10 @@ if termination_status(model) == OPTIMAL
     end
 
     if !isempty(balance_df)
-        CSV.write(joinpath(project_root, "Results", "BalanceIssues_simpleModel_$(timestamp).csv"), balance_df)
+        CSV.write(joinpath(project_root, "Results", "BalanceIssues_SimpleModel_$(timestamp).csv"), balance_df)
     else
         println("No balance issues or extra units needed at the end of the day.")
     end
-
     # Get MetaData for the solver run
     status = termination_status(model)
     runtime = solve_time(model)
@@ -313,7 +322,13 @@ if termination_status(model) == OPTIMAL
     bound = try objective_bound(model) catch; "N/A" end
     gap = try relative_optimality_gap(model) catch; "N/A" end
 
-    open(joinpath(project_root, "Results", "Summary_simpleModel_$(timestamp).txt"), "w") do f
+    km_costs_val = km_buff * sum(value(y[c, j]) * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:J)
+    coupling_costs_val = sum((value(v1_happening[n]) + value(v2_happening[n])) * v_penalty for n in actual_connections)
+    balance_costs_val = sum((value(balance_shortage[m, s]) + value(balance_excess[m, s])) * end_of_day_penalty for m in 1:M, s in 1:S)
+    extra_unit_costs_val = sum(value(extra_units[m, s]) * extra_unit_penalty for m in 1:M, s in 1:S)
+    format_output(val, total) = "$(round(val, digits=2)) ($(round((val / total) * 100, digits=2))%)"
+
+    open(joinpath(project_root, "Results", "Summary_SimpleModel_$(timestamp).txt"), "w") do f
         write(f, "------------------------------------------\n")
         write(f, "SOLVER REPORT\n")
         write(f, "------------------------------------------\n")
@@ -327,6 +342,12 @@ if termination_status(model) == OPTIMAL
         write(f, "- v_penalty: $v_penalty\n")
         write(f, "- end_of_day_penalty: $end_of_day_penalty\n")
         write(f, "- extra_unit_penalty: $extra_unit_penalty\n")
+        write(f, "------------------------------------------\n")
+        write(f, "Objective Function Breakdown:\n")
+        write(f, "Kilometer Costs for Compositions: $(format_output(km_costs_val, obj_val))\n")
+        write(f, "Coupling and decoupling cost: $(format_output(coupling_costs_val, obj_val))\n")
+        write(f, "Extra unit cost: $(format_output(extra_unit_costs_val, obj_val))\n")
+        write(f, "End-of-day balance cost: $(format_output(balance_costs_val, obj_val))\n")
     end
     
 else
