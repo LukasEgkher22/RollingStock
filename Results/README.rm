@@ -1,0 +1,7 @@
+There are five kind of files in this folder:
+- BalanceIssues.csv: These files contain extra units that were needed for the corresponding model
+- CompAssinments.csv: These files contain the compositions assigned to each trip in the optimal solution (e.g. first model run)
+- Summary.txt: These files contain the solver report and a breakdown of the objective function values for the optimal solution
+- UnitAssinment.csv: These files contain the units assigned to each composition in the optimal solution (e.g. second model run)
+- UnitSummary.txt: These files contain total unit costs and a breakdown of the units as well as from which composition solution this unit solution has been created from
+All files contain the model type and the creation date in their name
