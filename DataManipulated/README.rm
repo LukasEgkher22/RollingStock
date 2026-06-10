@@ -1,0 +1,4 @@
+The important file are the ones starting with "aggregated_trips", which are the output of the data manipulation and the input for the models. 
+In general only file with "terminals" in their name should be used, since they include Start and End terminal information which is necessary for (de)coupling logic.
+The "add" in the name indicates that this file contains additional trips that were manually created.
+The other files in this folder are intermediate files that were created during the data manipulation process and can be of help to understand the data manipulation process, but are not directly used in the models.

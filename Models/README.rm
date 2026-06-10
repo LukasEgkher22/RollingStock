@@ -1,0 +1,9 @@
+There are three main files for composition models in this folder:
+- Main_simpleModel.jl: This file contains the main model code for a simple composition model
+- Main_unitPresentation.jl: This file extends the simple model code by providing unit presentation 
+- Main_includingGGV.jl: This file contains the main model code inclduing GGVs
+
+The file Main_assignUnits.jl contains the code for the second model run, where units are assigned to the compositions from the first model run.
+The composition result on which the unit assignment should be done, has to be specified in the code.
+
+CompositionModel_functions.jl contains functions that are used in the main model files
