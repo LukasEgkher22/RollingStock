@@ -1,0 +1,21 @@
+------------------------------------------
+SOLVER REPORT
+------------------------------------------
+Status:         OPTIMAL
+Runtime:        342.42 seconds
+Objective:      386541.82999999996
+Lower Bound:    384932.571201452
+Optimality Gap: N/A
+------------------------------------------
+Model Parameters:
+- v_penalty: 1000
+- end_of_day_penalty: 100000
+- extra_unit_penalty: 100000
+- km_buff: 0.1
+- Based on data from: aggregated_trips_terminals_add.csv
+------------------------------------------
+Objective Function Breakdown:
+Kilometer Costs for Compositions: 375541.83 (97.15%)
+Coupling and decoupling cost: 11000.0 (2.85%)
+Extra unit cost: 0.0 (0.0%)
+End-of-day balance cost: 0.0 (0.0%)

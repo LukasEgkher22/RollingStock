@@ -288,10 +288,13 @@ an audit trail of unit movements and saves the results to CSV and TXT files.
 - `summary_dict::Dict{String, Int}`: A dictionary mapping unit types to the total 
   number of unique physical units required to service the entire schedule.
 """
-function assign_unit_ids(df::DataFrame; file_title::String = "TrainModel")
+function assign_unit_ids(df::DataFrame, file_path_BASEDAY::String, solution::String; file_title::String = "TrainModel")
     timestamp = Dates.format(Dates.now(), "yyyy-mm-dd_HHMMSS")
     summary_filename = "UnitSummary_$(file_title)_$(timestamp).txt"
     result_filename = "UnitAssignment_$(file_title)_$(timestamp).csv"
+    
+    xf = XLSX.readxlsx(file_path_BASEDAY)
+    RS_Data = DataFrame(XLSX.gettable(xf["Rolling Stock"]))
     
     # Setup Data
     working_df = sort(df, :Departure)
@@ -362,6 +365,8 @@ function assign_unit_ids(df::DataFrame; file_title::String = "TrainModel")
             
             # Create output row
             new_row = DataFrame(row)
+            # drop composition column
+            select!(new_row, Not(:Composition))
             new_row.UnitSpecificId .= uid
             push!(assigned_rows, new_row)
         end
@@ -375,7 +380,14 @@ function assign_unit_ids(df::DataFrame; file_title::String = "TrainModel")
     summary_io = IOBuffer()
     println(summary_io, "--- Unit Assignment Summary: $file_title ---")
     println(summary_io, "Generated: $timestamp")
-    
+    println(summary_io, "From Composition Solution: $solution\n")
+
+    total_unit_cost, total_km_cost = calculate_totals(result_df, RS_Data)
+    total_costs = total_unit_cost + total_km_cost
+    println(summary_io, "Total unit cost: $(total_unit_cost)")
+    println(summary_io, "Total kilometer cost: $(total_km_cost)")
+    println(summary_io, "Total costs: $(total_costs)\n")
+
     total_units = 0
     for utype in sort(collect(keys(unit_counters)))
         count = unit_counters[utype]
@@ -383,6 +395,7 @@ function assign_unit_ids(df::DataFrame; file_title::String = "TrainModel")
         summary_dict[utype] = count
         total_units += count
     end
+
     println(summary_io, "TOTAL UNIQUE UNITS: $total_units")
     println(summary_io, "\n[Initial Deployment]")
     for uid in sort(collect(keys(unit_start_locations)))
@@ -400,4 +413,34 @@ function assign_unit_ids(df::DataFrame; file_title::String = "TrainModel")
 
     println("Files generated: $result_filename, $summary_filename")
     return result_df, summary_dict
+end
+
+function calculate_totals(result_df, RS_Details)
+    total_unit_cost = 0.0
+    total_km_cost = 0.0
+    
+    results_copy = deepcopy(result_df)
+    # Get unique types in result_df
+    results_copy.TypeName = [split(id, "_")[1] for id in results_copy.UnitSpecificId]
+    unique_types = unique(results_copy.TypeName)
+    
+    for t in unique_types
+        # Find cost info for this type
+        row_idx = findfirst(==(t), RS_Details.Name)
+        isnothing(row_idx) && continue # Skip if type not found in cost table
+        
+        u_cost_per_unit = RS_Details[row_idx, "Unit cost"]
+        km_cost_per_km = RS_Details[row_idx, "Kilometer costs"]
+        
+        # Calculate unique units of this type
+        unit_count = length(unique(results_copy[results_copy.TypeName .== t, :UnitSpecificId]))
+        
+        # Calculate total distance for this type
+        total_dist = sum(results_copy[results_copy.TypeName .== t, :Distance])
+        
+        total_unit_cost += unit_count * u_cost_per_unit
+        total_km_cost += total_dist * km_cost_per_km
+    end
+    
+    return total_unit_cost, total_km_cost
 end

@@ -11,8 +11,10 @@ project_root = dirname(@__DIR__)
 include(joinpath(project_root, "DataTransformationScripts", "DataManipulation_functions.jl"))
 include(joinpath(project_root, "Models", "CompositionModel_functions.jl"))
 
+execution_file = "aggregated_trips_terminals.csv"
+
 # Read merged data from CSV
-timetable_data = CSV.read(joinpath(project_root, "DataManipulated", "aggregated_trips_with_terminals.csv"), DataFrame)
+timetable_data = CSV.read(joinpath(project_root, "DataManipulated", execution_file), DataFrame)
 connections = build_connections(timetable_data)
 
 # Read specific sheets from Excel file
@@ -72,9 +74,10 @@ comp_costs, comp_seats = get_composition_details(compositions, RS_Data[!, ["Kilo
 electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (comp_number[c, m] > 0) for m in 1:M)]
 
 # define penalty parameters for coupling and decoupling (example: 100 per unit)
-v_penalty = 100
-end_of_day_penalty = 10000
-extra_unit_penalty = 10000
+v_penalty = 1000
+end_of_day_penalty = 100000
+extra_unit_penalty = 100000
+km_buff = 0.1 # multiplier for km costs to make them more comparable to the penalties
 
 timetable_data.Index = 1:J
 
@@ -115,7 +118,7 @@ set_optimizer_attribute(model, "MIPGap", 0.005) # 0.5% optimality gap
 
 # ----------- Objective -----------
 # Minimize total cost (km_costs * distance)
-@objective(model, Min, sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:J) # distance costs for each composition used
+@objective(model, Min, km_buff * sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:J) # distance costs for each composition used
     + sum((v1_happening[n] + v2_happening[n]) * v_penalty for n in actual_connections) # make coupling/decoupling less attractive
     + sum((balance_shortage[m, s] + balance_excess[m, s]) * end_of_day_penalty for m in 1:M, s in 1:S)
     + sum(extra_units[m, s] * extra_unit_penalty for m in 1:M, s in 1:S)
@@ -130,6 +133,9 @@ for j in 1:J
                 fix(y[c, j], 0; force=true)
             end
         end
+    elseif timetable_data.TrainCategory[j] == "M"
+        continue
+        # M trains can be left empty or assigned a composition
     else
         fix(y[empty_comp_idx, j], 0; force=true)
     end
@@ -143,7 +149,6 @@ for j in 1:J
         end
     end
 end
-
 # A. Each trip must have EXACTLY one composition assigned
 for j in 1:J
     @constraint(model, sum(y[c, j] for c in 1:C) == 1)
@@ -267,12 +272,13 @@ if termination_status(model) == OPTIMAL
     assignments = DataFrame(
         TripId = Int[],
         TrainCategory = String[],
-        TrainId = String[],
+        TrainId = Int[],
         FromStation = String[],
         ToStation = String[],
         Departure = Int[],
         Arrival = Int[],
         Demand = Int[],
+        Distance = Float64[],
         Composition = String[]
     )
 
@@ -289,6 +295,7 @@ if termination_status(model) == OPTIMAL
                     Departure = timetable_data.DepartureFromStation[j],
                     Arrival = timetable_data.ArrivalToStation[j],
                     Demand = timetable_data.Demand[j],
+                    Distance = timetable_data.Distance_KM[j],
                     Composition = string(compositions[c])
                 ))
             end
@@ -357,7 +364,7 @@ if termination_status(model) == OPTIMAL
     bound = try objective_bound(model) catch; "N/A" end
     gap = try relative_optimality_gap(model) catch; "N/A" end
 
-    km_costs_val = sum(value(y[c, j]) * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:J)
+    km_costs_val = km_buff * sum(value(y[c, j]) * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:J)
     coupling_costs_val = sum((value(v1_happening[n]) + value(v2_happening[n])) * v_penalty for n in actual_connections)
     balance_costs_val = sum((value(balance_shortage[m, s]) + value(balance_excess[m, s])) * end_of_day_penalty for m in 1:M, s in 1:S)
     extra_unit_costs_val = sum(value(extra_units[m, s]) * extra_unit_penalty for m in 1:M, s in 1:S)
@@ -378,6 +385,8 @@ if termination_status(model) == OPTIMAL
         write(f, "- v_penalty: $v_penalty\n")
         write(f, "- extra_unit_penalty: $extra_unit_penalty\n")
         write(f, "- end_of_day_penalty: $end_of_day_penalty\n")
+        write(f, "- km_buff: $km_buff\n")
+        write(f, "- Based on data from: $execution_file\n")
         write(f, "------------------------------------------\n")
         write(f, "Objective Function Breakdown:\n")
         write(f, "Kilometer Costs for Compositions: $(format_output(km_costs_val, obj_val))\n")
