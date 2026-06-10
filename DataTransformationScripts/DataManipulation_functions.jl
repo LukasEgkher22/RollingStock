@@ -148,22 +148,17 @@ Arguments:
 - `filename`: The path/name for the CSV file if saving.
 """
 function build_route_map(df_timetable::DataFrame; save_to_csv::Bool = false, filename::String = "train_routes.csv")
-    # Store actual vectors in the dictionary for programmatic use
-    route_map = Dict{Tuple{String, String}, Vector{String}}()
-    
+    # Store actual vectors in the dictionary for programmatic use    
+    route_map = Dict{Tuple{String, String}, String}()
+
     for (key, subdf) in pairs(groupby(df_timetable, [:TrainCategory, :TrainId]))
-        if isempty(subdf) continue end
+        # 1. Get the FromStation column
+        # 2. Filter out "Start"
+        # 3. Convert to string to be safe (if they aren't already)
+        stations = [string(s) for s in subdf.FromStation if s != "Start"]
         
-        # Filter for stops and extract the Station column
-        stops = filter(row -> row.Type == "stop", subdf)
-        if isempty(stops) continue end
-        
-        # Convert keys and values to strings safely
-        cat = string(key.TrainCategory)
-        id = string(key.TrainId)
-        path = Vector{String}(stops.Station)
-        
-        route_map[(cat, id)] = path
+        # 4. Join the vector of strings with a comma
+        route_map[(string(key.TrainCategory), string(key.TrainId))] = join(stations, ", ")
     end
 
     if save_to_csv
@@ -172,7 +167,7 @@ function build_route_map(df_timetable::DataFrame; save_to_csv::Bool = false, fil
             TrainCategory = [k[1] for k in keys(route_map)],
             TrainId = [k[2] for k in keys(route_map)],
             # Join the vector into a simple string for the CSV column
-            Route = [join(v, ", ") for v in values(route_map)]
+            Route = [v for v in values(route_map)]
         )
         
         CSV.write(filename, csv_df)
@@ -258,7 +253,7 @@ This function performs a three-step process:
 - Segments with stations not found in the timetable are filtered out.
 """
 
-function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrastructure::Dict; save_to_csv::Bool = false, filename::String = "merged_data.csv")
+function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrastructure::Dict; save_to_csv::Bool = false, filename::String = "merged_data.csv", add_Mtrains::Bool = false)
     # Clean types
     tt = copy(df_timetable)
     ps = copy(df_passenger)
@@ -267,7 +262,7 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
 
     results = []
 
-    # Group by Train
+    # Group by Train from the timetable (this is our primary source)
     gdf_tt = groupby(tt, [:TrainCategory, :TrainId])
 
     for train_tt in gdf_tt
@@ -276,52 +271,58 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
 
         # Filter passenger data for this train
         train_ps = ps[(ps.TrainCategory .== t_cat) .& (ps.TrainId .== t_id), :]
-        if isempty(train_ps) continue end
+        
+        # LOGIC: Skip if no passenger data UNLESS it is Category "M"
+        if isempty(train_ps) && (!add_Mtrains || t_cat != "M")
+            continue 
+        end
 
         # Map for station info: Name -> (Index, Type)
         st_info = Dict(row.Station => (i, row.Type) for (i, row) in enumerate(eachrow(train_tt)))
 
         # --- STEP A: Consolidate Section Loads into Stop-to-Stop Segments ---
-        # transform A-B(30), B-D(30) [where B is pass] into A-D(30) and give a warning if demand changes at B
         cleaned_segments = []
-        i = 1
-        while i <= nrow(train_ps)
-            from_st = string(train_ps[i, :FromStation])
-            to_st   = string(train_ps[i, :ToStation])
-            demand  = train_ps[i, :PassengerNum]
+        
+        # Only run consolidation if we actually have passenger data
+        if !isempty(train_ps)
+            i = 1
+            while i <= nrow(train_ps)
+                from_st = string(train_ps[i, :FromStation])
+                to_st   = string(train_ps[i, :ToStation])
+                demand  = train_ps[i, :PassengerNum]
 
-            # Chain rows as long as the 'to_st' is a "stop" station
-            while i < nrow(train_ps) && get(st_info, to_st, (0, "stop"))[2] == "pass"
-                i += 1
-                next_demand = train_ps[i, :PassengerNum]
-                
-                if next_demand != demand
-                    @warn "Demand changed from $demand to $next_demand at pass station '$to_st' (Train $t_id)."
-                    demand = max(demand, next_demand)  # Optionally take the max demand to be conservative
+                # Chain rows as long as the 'to_st' is a "pass" station
+                while i < nrow(train_ps) && get(st_info, to_st, (0, "stop"))[2] == "pass"
+                    i += 1
+                    next_demand = train_ps[i, :PassengerNum]
+                    
+                    if next_demand != demand
+                        @warn "Demand changed from $demand to $next_demand at pass station '$to_st' (Train $t_id)."
+                        demand = max(demand, next_demand) 
+                    end
+                    
+                    to_st = string(train_ps[i, :ToStation])
                 end
                 
-                to_st = string(train_ps[i, :ToStation])
+                idx_f = get(st_info, from_st, (0, ""))[1]
+                idx_t = get(st_info, to_st, (0, ""))[1]
+                
+                if idx_f != 0 && idx_t != 0
+                    push!(cleaned_segments, (f_idx=idx_f, t_idx=idx_t, demand=demand))
+                end
+                i += 1
             end
-            
-            # Store the cleaned segment with its timetable indices
-            idx_f = get(st_info, from_st, (0, ""))[1]
-            idx_t = get(st_info, to_st, (0, ""))[1]
-            
-            if idx_f != 0 && idx_t != 0
-                push!(cleaned_segments, (f_idx=idx_f, t_idx=idx_t, demand=demand))
-            end
-            i += 1
         end
 
         # --- STEP B: Map to Timetable Stop-to-Stop Legs ---
-        # If tt has stops A, B, C, D and cleaned_ps has A-D(30) create rows for A-B(30), B-C(30), C-D(30)
         stop_indices = findall(x -> x == "stop", train_tt.Type)
         
         for k in 1:(length(stop_indices) - 1)
             idx_start = stop_indices[k]
             idx_end   = stop_indices[k+1]
             
-            # Find which cleaned segment covers this specific stop-to-stop leg
+            # Find demand from cleaned segments. 
+            # If cleaned_segments is empty (Category M case), leg_demand stays 0.
             leg_demand = 0
             for seg in cleaned_segments
                 if seg.f_idx <= idx_start && seg.t_idx >= idx_end
@@ -330,34 +331,28 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
                 end
             end
 
-            # Get infrastructure data for this leg
-             # 2. AGGREGATE INFRASTRUCTURE DATA
-            # We look at every single step in the timetable between idx_start and idx_end
+            # --- AGGREGATE INFRASTRUCTURE DATA ---
             total_distance = 0.0
             is_fully_electrified = true
             segment_found_count = 0
-            required_segments = idx_end - idx_start
 
             for j in idx_start:(idx_end - 1)
                 st_a = train_tt.Station[j]
                 st_b = train_tt.Station[j+1]
                 
-                # Sort keys to match Dict format
                 route_key = st_a < st_b ? (st_a, st_b) : (st_b, st_a)
                 
                 if haskey(df_infrastructure, route_key)
                     infra = df_infrastructure[route_key]
                     total_distance += infra.km
-                    # If any single part is NOT electrified, the whole leg is not
                     is_fully_electrified = is_fully_electrified && infra.electrified
                     segment_found_count += 1
                 else
-                    @warn "Missing infrastructure data for segment: $st_a to $st_b"
+                    @warn "Missing infra: $st_a to $st_b"
                     is_fully_electrified = false
                 end
             end
 
-            # If no segments were found, ensure distance is 0 and electrified is false
             if segment_found_count == 0
                 is_fully_electrified = false
             end
@@ -369,7 +364,7 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
                 DepartureFromStation = time_string_to_minutes(train_tt.Departure[idx_start]),
                 ToStation            = train_tt.Station[idx_end],
                 ArrivalToStation     = time_string_to_minutes(train_tt.Arrival[idx_end]),
-                Demand               = leg_demand,
+                Demand               = leg_demand, # Will be 0 for 'M' if no data was found
                 Distance_KM          = round(total_distance, digits = 1),
                 Electrified          = is_fully_electrified
             ))
@@ -387,6 +382,7 @@ function merge_data(df_timetable::DataFrame, df_passenger::DataFrame, df_infrast
 end
 
 """
+
 Define connecitons based on consecutive trips in the timetable
 
 # Arguments
@@ -435,7 +431,7 @@ function build_connections(df_timetable; save_to_csv::Bool = false, filename::St
             ))
         end
         
-        # Find last station (end of route)
+    #     # Find last station (end of route)
         last_row = train_data[end, :]
         last_to = last_row.ToStation
         last_arrival = last_row.ArrivalToStation
@@ -606,9 +602,10 @@ points or endpoints in the network—and creates synthetic rows to represent the
 - `DataFrame`: Original data with added terminal rows for each train, sorted by train ID, 
   arrival time, and station name (with "End" rows appearing last).
 """
-function add_terminal_rows(df::DataFrame)
+function add_terminal_rows(df::DataFrame; save_to_csv::Bool = false, filename::String = "aggregated_trips_with_terminals.csv")
     # Create an empty DataFrame with the same structure to store results
     new_df = DataFrame()
+    has_GGVId = hasproperty(df, :GGVId)
     
     # Process each train individually
     for sub_df in groupby(df, :TrainId)
@@ -625,7 +622,8 @@ function add_terminal_rows(df::DataFrame)
         for s in starts
             # Find the original row where this station first appears
             orig = sub_df[findfirst(==(s), sub_df.FromStation), :]
-            push!(train_terminal_rows, (
+
+            row = (
                 TrainCategory = orig.TrainCategory,
                 TrainId = orig.TrainId,
                 FromStation = "Start",
@@ -635,26 +633,40 @@ function add_terminal_rows(df::DataFrame)
                 Demand = 0,
                 Distance_KM = 0.0,
                 Electrified = true
-            ))
-        end
+            )
+
+            if has_GGVId
+                row = merge(row, (GGVId = orig.GGVId,))
+            end
+
+            push!(train_terminal_rows, row)
+         end
         
         # Build "End" rows
         for e in ends
             # Find the original row where this station last appears
             orig = sub_df[findfirst(==(e), sub_df.ToStation), :]
-            push!(train_terminal_rows, (
+
+            # 1. Define the base fields
+            row = (
                 TrainCategory = orig.TrainCategory,
                 TrainId = orig.TrainId,
                 FromStation = e,
-                DepartureFromStation = orig.ArrivalToStation, # Use the arrival time as departure
+                DepartureFromStation = orig.ArrivalToStation,
                 ToStation = "End",
                 ArrivalToStation = orig.ArrivalToStation,
                 Demand = 0,
                 Distance_KM = 0.0,
                 Electrified = true
-            ))
+            )
+
+            # 2. Merge GGVId only if it exists
+            if has_GGVId
+                row = merge(row, (GGVId = orig.GGVId,))
+            end
+
+            push!(train_terminal_rows, row)
         end
-        
         # Combine the new terminal rows with the original data for this train
         append!(new_df, vcat(sub_df, train_terminal_rows))
     end
@@ -669,18 +681,32 @@ function add_terminal_rows(df::DataFrame)
         ]
     )
     
+    if save_to_csv
+        CSV.write(filename, new_df)
+    end
+    
     return new_df
 end
 
 """
-Aggregates train trips based on TrainId and specific cut stations defined in an Excel config.
+Aggregates individual trip legs into logical segments based on operational cutpoints.
+
+This function groups train trips by their `TrainId` and merges sequential rows into a single 
+aggregated trip. It uses an external configuration file to determine "cut stations" where 
+a journey should be split (e.g., major terminals). It also calculates the maximum demand 
+and total distance for the resulting segments.
+
+# Arguments
+- `merged_data::DataFrame`: The raw trip data containing individual legs.
+- `config_path::String`: Path to an Excel file with "Trip cutpoints" and "Train system mapping".
+- `save_to_csv::Bool`: If true, saves the result and a list of critical stations to CSV.
+- `filename::String`: The name for the exported aggregated trip file.
+
+# Returns
+- `result_df::DataFrame`: A DataFrame where each row represents a logical trip segment 
+  from a starting station to a cutpoint or final destination.
 """
-function aggregate_train_trips(
-    merged_data::DataFrame, 
-    config_path::String; 
-    save_to_csv::Bool = false, 
-    filename::String = "merged_data_combined.csv"
-)
+function aggregate_train_trips(merged_data::DataFrame, config_path::String; save_to_csv::Bool = false, filename::String = "aggregated_trips.csv")
     # 1. Load Excel configuration sheets
     xf = XLSX.readxlsx(config_path)
     
@@ -699,11 +725,18 @@ function aggregate_train_trips(
     
     combined_rows = []
     
+    
+    # NEW: Set to collect unique stations (Starts, Cuts, and Ends)
+    critical_stations = Set{String}()
+
     # 3. Group by TrainId to process each train's route
     gdf = groupby(df, :TrainId)
     
     for group in gdf
         tid = group[1, :TrainId]
+
+        # Add the very first station of this TrainId journey
+        push!(critical_stations, string(group[1, :FromStation]))
         
         # Determine the TrainSystem for this TrainId based on ranges
         # Logic: Find row where From_number <= tid <= To_number
@@ -732,6 +765,9 @@ function aggregate_train_trips(
             
             if is_cut_station || is_last_trip
                 
+                # Record the cut station or the end station
+                push!(critical_stations, string(group[i, :ToStation]))
+                
                 # Aggregate the collected segment into one row
                 push!(combined_rows, (
                     TrainCategory = current_segment[1, :TrainCategory],
@@ -757,10 +793,303 @@ function aggregate_train_trips(
     if save_to_csv
         full_filename = endswith(filename, ".csv") ? filename : filename * ".csv"
         CSV.write(full_filename, result_df)
-        println("File saved to: $full_filename")
+        
+        cutstations_out = DataFrame(Station = sort(collect(critical_stations)))
+        CSV.write("cutstations.csv", cutstations_out)
+
+        println("Files saved: $full_filename and cutstations.csv")
     end
     
     return result_df
 end
 
+"""
+Identifies and labels groups of connected trains (GGVs) based on shared station transitions.
 
+This function identifies "webs" of connectivity where different TrainIds meet, split, or 
+merge at a station within a specific time window. It applies business rules (such as 
+parity checks and station exclusions) to determine valid connections and assigns a 
+unique `GGVId` string to all participating TrainIds in a connected component.
+
+# Arguments
+- `df::DataFrame`: The aggregated trip data.
+- `save_to_csv::Bool`: If true, exports the data with the new GGVId column.
+- `filename::String`: The name for the exported CSV file.
+- `max_time_gap::Int`: The maximum allowed time gap (in minutes) between arrival and departure for a valid connection.
+
+# Returns
+- `result_df::DataFrame`: The input DataFrame with an added `GGVId` column representing 
+  the interconnected train groups.
+"""
+function add_GGV_column(df::DataFrame; save_to_csv::Bool = false, filename::String = "aggregated_trips_GGVId.csv", max_time_gap::Int = 20)
+    # 1. Setup and Business Rules
+    allowed_combinations = Set([
+        ("KH/86", "FA/86", "ES/86"),
+        ("NF/86", "KH/86", "KB/86"), 
+        ("KB/86", "KK/86", "NÆ/86"),
+        ("NÆ/86", "KK/86", "KB/86")
+    ])
+
+    # This set will store pairs of TrainIds that are connected
+    # Using a Set of Tuples ensures we don't store duplicates
+    edges = Set{Tuple{Any, Any}}()
+    all_train_ids = unique(df.TrainId)
+
+    # 2. Identify all valid pairwise connections (A -> B)
+    # We iterate through the dataframe to find which TrainIds "touch" each other
+    for rowA in eachrow(df)
+        for rowB in eachrow(df)
+
+            parity_id_A = get_id_part(rowA.TrainId, :last)
+            parity_id_B = get_id_part(rowB.TrainId, :first)
+
+            same_station = rowA.ToStation == rowB.FromStation
+            different_trains = rowA.TrainId != rowB.TrainId
+            same_category = rowA.TrainCategory == rowB.TrainCategory
+            departure_after_arrival = 0 <= (rowB.DepartureFromStation - rowA.ArrivalToStation) <= max_time_gap
+            no_backtracking = rowA.FromStation != rowB.ToStation
+            no_materialization = rowA.FromStation != "Start" && rowB.ToStation != "End"
+            odd_even_check = (parity_id_A % 2) == (parity_id_B % 2) || (string(rowA.FromStation), string(rowA.ToStation), string(rowB.ToStation)) in allowed_combinations
+            not_category_M = rowA.TrainCategory != "M"
+
+
+            if same_station && different_trains && departure_after_arrival && no_backtracking && no_materialization && odd_even_check && same_category && not_category_M
+                # Add a connection between these two IDs
+                push!(edges, (rowA.TrainId, rowB.TrainId))
+            end
+        end
+    end
+
+    # 3. Build an Adjacency List to find groups (Connected Components)
+    # This handles merges (A&B -> C) and splits (C -> D&E)
+    adj = Dict{Any, Set{Any}}()
+    for tid in all_train_ids
+        adj[tid] = Set{Any}()
+    end
+    for (u, v) in edges
+        push!(adj[u], v)
+        push!(adj[v], u) # Undirected graph to find the whole "web"
+    end
+
+    # 4. Traverse the graph to find groups
+    visited = Set{Any}()
+    # This dictionary will map a TrainId to its final GGV string
+    id_to_ggv_map = Dict{Any, String}()
+
+    for tid in all_train_ids
+        if !(tid in visited) && !isempty(adj[tid])
+            # Start a new group
+            component = []
+            stack = [tid]
+            push!(visited, tid)
+            
+            while !isempty(stack)
+                curr = pop!(stack)
+                push!(component, curr)
+                for neighbor in adj[curr]
+                    if !(neighbor in visited)
+                        push!(visited, neighbor)
+                        push!(stack, neighbor)
+                    end
+                end
+            end
+            
+            # Create the aggregated GGVId string (sorted for consistency)
+            sort!(component)
+            ggv_id_string = join(component, "_")
+            
+            # Map every TrainId in this group to that string
+            for member in component
+                id_to_ggv_map[member] = ggv_id_string
+            end
+        end
+    end
+
+    # 5. Create the final DataFrame
+    # We copy the original and add the GGVId column
+    result_df = copy(df)
+    
+    # We use a comprehension to fill the column: 
+    # if the TrainId is in our map, use the string, otherwise use "-1"
+    result_df.GGVId = [get(id_to_ggv_map, tid, "-1") for tid in result_df.TrainId]
+
+    # 6. Save and Return
+    if save_to_csv
+        CSV.write(filename, result_df)
+        println("Data with GGVIds saved to $filename")
+    end
+
+    return result_df
+end
+
+"""
+Merges sequential TrainIds into a single identifier if they have a strict 1-to-1 relationship.
+
+This function performs a "strict merge" where Train A is renamed to include Train B only 
+if Train A flows exclusively into Train B, and Train B arrives exclusively from Train A. 
+This simplifies the schedule by treating continuous physical movements as a single 
+logical entity.
+
+# Arguments
+- `df::DataFrame`: The trip data containing potentially separate but sequential TrainIds.
+- `save_to_csv::Bool`: If true, exports the merged ID results to CSV.
+- `filename::String`: The name for the exported CSV file.
+- `max_time_gap::Int`: The maximum time gap (in minutes) allowed between consecutive trips.
+
+# Returns
+- `df::DataFrame`: The DataFrame with updated `TrainId` strings (e.g., "101_102").
+"""
+function pre_merge_train_ids(df::DataFrame; save_to_csv::Bool = false, filename::String = "aggregated_trips_merged.csv", max_time_gap::Int = 20)
+    allowed_combinations = Set([
+        ("KH/86", "FA/86", "ES/86"),
+        ("NF/86", "KH/86", "KB/86"), 
+        ("KB/86", "KK/86", "NÆ/86"),
+        ("NÆ/86", "KK/86", "KB/86")
+    ])
+
+    # 1. Summarize TrainId extents
+    train_extents = combine(groupby(df, :TrainId)) do subdf
+        sdf = sort(subdf, :DepartureFromStation)
+        first_trip = sdf[1, :]
+        last_trip = sdf[end, :]
+        return (
+            LastFrom = last_trip.FromStation,
+            LastTo = last_trip.ToStation,
+            LastArrival = last_trip.ArrivalToStation,
+            FirstFrom = first_trip.FromStation,
+            FirstTo = first_trip.ToStation,
+            FirstDeparture = first_trip.DepartureFromStation,
+            Category = first_trip.TrainCategory,
+            Parity = first_trip.TrainId % 2
+        )
+    end
+
+    # 2. Find ALL valid potential connections
+    # We store them to count degrees (how many ins/outs each train has)
+    all_possible_edges = []
+    out_degree = Dict{Any, Int}()
+    in_degree = Dict{Any, Int}()
+    
+    # Initialize degrees
+    for tid in train_extents.TrainId
+        out_degree[tid] = 0
+        in_degree[tid] = 0
+    end
+
+    for rowA in eachrow(train_extents)
+        for rowB in eachrow(train_extents)
+            if rowA.TrainId == rowB.TrainId continue end
+            
+            # Use your business logic
+            if rowA.LastTo == rowB.FirstFrom &&
+               0 <= (rowB.FirstDeparture - rowA.LastArrival) <= max_time_gap &&
+               rowA.Category == rowB.Category && rowA.Category != "M" &&
+               (   rowA.Parity == rowB.Parity 
+                    # || (string(rowA.LastFrom), string(rowA.LastTo), string(rowB.FirstTo)) in allowed_combinations
+               )
+                
+                push!(all_possible_edges, (src=rowA.TrainId, dst=rowB.TrainId))
+                out_degree[rowA.TrainId] += 1
+                in_degree[rowB.TrainId] += 1
+            end
+        end
+    end
+
+    # 3. Identify "Strict" links
+    # A link A -> B is strict ONLY IF A has 1 outgoing AND B has 1 incoming
+    strict_links = Dict{Any, Any}()
+    for edge in all_possible_edges
+        if out_degree[edge.src] == 1 && in_degree[edge.dst] == 1
+            strict_links[edge.src] = edge.dst
+        end
+    end
+
+    # 4. Build the chains (Unlimited length for strict segments)
+    final_id_map = Dict{Any, String}()
+    processed = Set{Any}()
+
+    for tid in train_extents.TrainId
+        tid in processed && continue
+        
+        # Find the start of this strict chain segment
+        curr = tid
+        # Reverse lookup to find the head
+        reverse_strict = Dict(v => k for (k, v) in strict_links)
+        while haskey(reverse_strict, curr)
+            curr = reverse_strict[curr]
+        end
+        
+        # Follow the strict chain forward
+        head = curr
+        chain = [head]
+        while haskey(strict_links, curr)
+            curr = strict_links[curr]
+            push!(chain, curr)
+        end
+        
+        # Map all members to the new joined ID
+        # Only create a joined string if the chain actually contains more than 1 train
+        new_id = length(chain) > 1 ? join(chain, "_") : string(head)
+        for member in chain
+            final_id_map[member] = new_id
+            push!(processed, member)
+        end
+    end
+
+    # 5. Overwrite the TrainId in the original DataFrame and sort it for better readability
+    df.TrainId = [get(final_id_map, tid, string(tid)) for tid in df.TrainId]
+    df = sort(df, [:TrainId, :DepartureFromStation])
+
+    if save_to_csv
+        CSV.write(filename, df)
+        println("Pre-merged TrainIds saved to $filename")
+    end
+    
+    return df
+end
+
+# Helper function to get the numeric ID from a potentially merged string
+function get_id_part(id_val, position::Symbol)
+    s = string(id_val)
+    parts = split(s, '_')
+    if position == :first
+        return parse(Int, parts[1])
+    elseif position == :last
+        return parse(Int, parts[end])
+    end
+end
+
+
+function add_additional_M_trains(result_new::DataFrame, file_path_additional_trips::String)
+    additional_trips = CSV.read(file_path_additional_trips, DataFrame)
+    for col in names(additional_trips)
+        target_type = eltype(result_new[!, col])
+        current_type = eltype(additional_trips[!, col])
+        
+        if current_type != target_type
+            println("Column $col: Converting $current_type to $target_type.")
+
+            if target_type <: AbstractString
+                # CASE 1: Target is String (use string.() instead of convert)
+                additional_trips[!, col] = string.(additional_trips[!, col])
+                
+            elseif current_type <: AbstractString && target_type <: Number
+                # CASE 2: Source is String, Target is Number (use parse)
+                additional_trips[!, col] = [
+                    isnothing(x) || x == "" || x == "missing" ? 0 : parse(target_type, string(x)) 
+                    for x in additional_trips[!, col]
+                ]
+                
+            else
+                # CASE 3: Standard numeric conversions (e.g., Int to Float)
+                try
+                    additional_trips[!, col] = convert.(target_type, additional_trips[!, col])
+                catch e
+                    @warn "Could not convert $col to $target_type automatically. Skipping."
+                end
+            end
+        end
+    end
+    result_new = vcat(result_new, additional_trips)
+    return result_new
+end

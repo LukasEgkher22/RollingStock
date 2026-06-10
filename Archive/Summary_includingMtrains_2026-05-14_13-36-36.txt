@@ -1,0 +1,13 @@
+------------------------------------------
+SOLVER REPORT
+------------------------------------------
+Status:         OPTIMAL
+Runtime:        127.13 seconds
+Objective:      3.7203786999999997e6
+Lower Bound:    3.7203786999999997e6
+Optimality Gap: N/A
+------------------------------------------
+
+Parameter tuning results:
+- v_penalty = 100
+- extra_unit_penalty = 10000
