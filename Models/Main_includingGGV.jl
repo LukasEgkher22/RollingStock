@@ -198,17 +198,23 @@ for m in 1:M, s in 1:S  # coupled == decoupled
     @constraint(model, sum(v1[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]) == sum(v2[m, n] for n in 1:N if connections[n, "ConnectionStation"] == stations[s]))
 end
 
-# F. define storage variable - storage = night_capacity - coupled + uncoupled + extra (allow extra units, if necessary, but expensive)
 for n in 1:N
-    earlier_connections = [n2 for n2 in 1:N if
+    earlier_connections_v1 = [n2 for n2 in 1:N if
         (connections[n2, "ArrivalAtConnection"] <= connections[n, "DepartureFromConnection"])
         && (connections[n2, "ConnectionStation"] == connections[n, "ConnectionStation"])
+    ]
+
+    earlier_connections_v2 = [n2 for n2 in 1:N if
+        (n2 == n) || (
+            (connections[n2, "ArrivalAtConnection"] + (connections[n2,"ToStation"] == "End" ? 0 : 60) <= connections[n, "DepartureFromConnection"])
+            && (connections[n2, "ConnectionStation"] == connections[n, "ConnectionStation"])
+        )
     ]
     for m in 1:M
         @constraint(model, 
             storage[m, n] == extra_units[m, station_to_idx[connections[n, "ConnectionStation"]]] +
                 get(night_capacity_dict, (connections[n, "ConnectionStation"], RS_Data.Name[m]), (0, 0))[1]
-                + sum(v2[m, n2] - v1[m, n2] for n2 in earlier_connections)
+                + sum(v2[m, n2] for n2 in earlier_connections_v2) - sum(v1[m, n2] for n2 in earlier_connections_v1)
         )
     end
 end
@@ -260,6 +266,47 @@ for (key, trip_indices) in groups
             
             for m in 1:M
                 @constraint(model, u[m, j_current] == u[m, j_next])
+            end
+        end
+    end
+end
+
+# G4. Flow conservation for each GGVId at every station it touches
+for (group_key, trip_indices) in groups
+    # 1. Identify all stations involved in this GGV group
+    # We look at both Departure and Arrival stations of all trips in the group
+    involved_stations = unique(vcat(
+        [timetable_data.FromStation[j] for j in trip_indices],
+        [timetable_data.ToStation[j] for j in trip_indices]
+    ))
+
+    for s in involved_stations
+        incoming_trips = [j for j in trip_indices if timetable_data.ToStation[j] == s]
+        outgoing_trips = [j for j in trip_indices if timetable_data.FromStation[j] == s]
+
+        # Use the corrected filter here:
+        relevant_connections = [n for n in 1:N if connections[n, "ConnectionStation"] == s && (
+            any(connections[n, "TrainId"] == timetable_data.TrainId[j] for j in incoming_trips) || 
+            any(connections[n, "TrainId"] == timetable_data.TrainId[j] for j in outgoing_trips)
+        )]
+
+        if !isempty(incoming_trips) || !isempty(outgoing_trips)
+            for m in 1:M
+                # Units arriving from the GGV group
+                units_in = @expression(model, sum(y[c, j] * comp_number[c, m] 
+                                                for j in incoming_trips, c in 1:C))
+                
+                # Units departing with the GGV group
+                units_out = @expression(model, sum(y[c, j] * comp_number[c, m] 
+                                                 for j in outgoing_trips, c in 1:C))
+                
+                # Net coupling/decoupling occurring in connections involving these trips
+                # v1: units added from storage; v2: units sent to storage
+                coupled = @expression(model, sum(v1[m, n] for n in relevant_connections))
+                decoupled = @expression(model, sum(v2[m, n] for n in relevant_connections))
+
+                # Flow Balance: In + Coupled == Out + Decoupled
+                @constraint(model, units_in + coupled == units_out + decoupled)
             end
         end
     end
