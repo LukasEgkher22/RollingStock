@@ -26,9 +26,9 @@ from pathlib import Path
 # Hardcoded Runner Settings
 # ---------------------------------------------------------------------------
 # Edit these values to run without CLI flags.
-HARDCODED_SOURCE_CSV = ""                    # Optional fixed CSV filename. Empty -> auto-pick newest CSV.
-HARDCODED_SCRIPT = "unit"                  # "trainid" or "unit"
-HARDCODED_VALUE = "all"                  # TrainId/Unit value, or "all" for every unique value
+HARDCODED_SOURCE_CSV = "UnitAssignment_UnitPreservation_2026-06-10_174213.csv"                    # Optional fixed CSV filename. Empty -> auto-pick newest CSV.
+HARDCODED_SCRIPT = "trainid"                  # "trainid" or "unit"
+HARDCODED_VALUE = "6"                  # TrainId/Unit value, or "all" for every unique value
 HARDCODED_FILTERED_OUTPUT = ""             # Empty -> do not persist filtered CSV
 HARDCODED_CHART_OUTPUT = ""                # Empty -> let target script choose output name
 HARDCODED_TIME_OFFSET = 0
@@ -154,7 +154,13 @@ def resolve_source_csv(script_dir: Path, source_arg: Path | None) -> Path:
         return source_arg
 
     if HARDCODED_SOURCE_CSV.strip():
-        return script_dir / HARDCODED_SOURCE_CSV
+        hardcoded_path = script_dir / HARDCODED_SOURCE_CSV
+        if hardcoded_path.exists():
+            return hardcoded_path
+        print(
+            f"Warning: HARDCODED_SOURCE_CSV not found: {hardcoded_path}. "
+            "Falling back to auto-pick."
+        )
 
     if AUTO_PICK_LATEST_CSV:
         candidates = [
