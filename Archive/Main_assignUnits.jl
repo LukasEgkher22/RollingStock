@@ -1,14 +1,16 @@
-using CSV, DataFrames
+using CSV, DataFrames, Dates
 
 project_root = dirname(@__DIR__)
 include(joinpath(project_root, "Models", "CompositionModel_functions.jl"))
-file_path_BASEDAY = normpath(joinpath(parent_dir, "Data", "Base Day TUE.xlsx"))
+file_path_BASEDAY = normpath(joinpath(project_root, "Data", "Base Day TUE.xlsx"))
 
 # TODO: Change the file name of the composition solution here
-solution = "CompAssignments_UnitPreservation_2026-06-10_161902.csv"
+solution = "CompAssignments_GGV_2026-06-17_110857.csv"
 
 model = split(solution, "_")[2]
 result_path = normpath(joinpath(project_root, "Results", solution))
+reallocation_sheet = "Reallocation"
+turnover_rules = create_turnover_dict(file_path_BASEDAY, reallocation_sheet)
 df = CSV.read(result_path, DataFrame)
 
 

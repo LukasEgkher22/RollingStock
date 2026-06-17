@@ -206,15 +206,22 @@ end
 
 # F. define storage variable - storage = night_capacity - coupled + uncoupled + extra (allow extra units, if necessary, but expensive)
 for n in 1:N
-    earlier_connections = [n2 for n2 in 1:N if
+    earlier_connections_v1 = [n2 for n2 in 1:N if
         (connections[n2, "ArrivalAtConnection"] <= connections[n, "DepartureFromConnection"])
         && (connections[n2, "ConnectionStation"] == connections[n, "ConnectionStation"])
+    ]
+
+    earlier_connections_v2 = [n2 for n2 in 1:N if
+        (n2 == n) || (
+            (connections[n2, "ArrivalAtConnection"] + (connections[n2,"ToStation"] == "End" ? 0 : 60) <= connections[n, "DepartureFromConnection"])
+            && (connections[n2, "ConnectionStation"] == connections[n, "ConnectionStation"])
+        )
     ]
     for m in 1:M
         @constraint(model, 
             storage[m, n] == extra_units[m, station_to_idx[connections[n, "ConnectionStation"]]] +
                 get(night_capacity_dict, (connections[n, "ConnectionStation"], RS_Data.Name[m]), (0, 0))[1]
-                + sum(v2[m, n2] - v1[m, n2] for n2 in earlier_connections)
+                + sum(v2[m, n2] for n2 in earlier_connections_v2) - sum(v1[m, n2] for n2 in earlier_connections_v1)
         )
     end
 end
