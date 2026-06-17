@@ -29,7 +29,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-from matplotlib.patches import FancyBboxPatch
+from matplotlib.patches import FancyBboxPatch, Patch
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +114,6 @@ _PALETTES = [
 # Layout constants (in data-row units)
 ROW_H       = 1.0    # total height reserved per unit row
 BAR_H       = 0.52   # height of the main coloured bar
-ACCENT_H    = 0.10   # thin stripe at the top of the bar
 BAR_BOTTOM  = 0.30   # y-offset of bar bottom within row (leaves room for labels below)
 LABEL_GAP   = 0.04   # gap between bar bottom and first label line
 LINE_H      = 0.13   # vertical spacing between label lines
@@ -124,7 +123,24 @@ def _bar_bottom(row_idx: int) -> float:
     return row_idx * ROW_H + BAR_BOTTOM
 
 
-def render(rows: list[dict], output_path: Path, time_offset: int, dpi: int, train_id_label: str) -> None:
+def _trainid_sort_key(train_id: str) -> tuple[int, int | str]:
+    text = train_id.strip()
+    if text.isdigit():
+        return (0, int(text))
+    return (1, text)
+
+
+def render(
+    rows: list[dict],
+    output_path: Path,
+    time_offset: int,
+    dpi: int,
+    train_id_label: str,
+    chart_title: str | None = None,
+    color_by_train_id: bool = False,
+    show_color_legend: bool = False,
+    color_legend_title: str = "Items",
+) -> None:
     # ---- group by unit, preserve first-departure order ----
     unit_segs: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
@@ -143,8 +159,19 @@ def render(rows: list[dict], output_path: Path, time_offset: int, dpi: int, trai
     fig_h = max(3,  n_units * ROW_H * 1.6 + 1.5)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), constrained_layout=True)
 
+    color_keys: list[str]
+    if color_by_train_id:
+        color_keys = sorted({row["TrainId"].strip() for row in rows if row.get("TrainId", "").strip()}, key=_trainid_sort_key)
+    else:
+        color_keys = units
+
+    color_palette = {
+        key: _PALETTES[index % len(_PALETTES)][0]
+        for index, key in enumerate(color_keys)
+    }
+
     for row_idx, unit in enumerate(units):
-        fill_color, accent_color = _PALETTES[row_idx % len(_PALETTES)]
+        fill_color, _accent_color = _PALETTES[row_idx % len(_PALETTES)]
         segments = sorted(unit_segs[unit], key=lambda r: int(r["Departure"]))
 
         bar_btm = _bar_bottom(row_idx)
@@ -154,34 +181,26 @@ def render(rows: list[dict], output_path: Path, time_offset: int, dpi: int, trai
             t0 = int(seg["Departure"]) - time_offset
             t1 = int(seg["Arrival"])   - time_offset
             width = t1 - t0
+            color_key = seg["TrainId"].strip() if color_by_train_id else unit
+            segment_fill = color_palette.get(color_key, fill_color)
 
             # Main fill
             bar = FancyBboxPatch(
                 (t0, bar_btm), width, BAR_H,
                 boxstyle="square,pad=0",
-                facecolor=fill_color, edgecolor="black", linewidth=0.6, zorder=3,
+                facecolor=segment_fill, edgecolor="black", linewidth=0.6, zorder=3,
             )
             ax.add_patch(bar)
 
-            # Accent stripe along top
-            stripe = FancyBboxPatch(
-                (t0, bar_btm + BAR_H - ACCENT_H), width, ACCENT_H,
-                boxstyle="square,pad=0",
-                facecolor=accent_color, edgecolor="none", zorder=4,
+            # Draw unit label in every individual segment block.
+            ax.text(
+                t0 + width / 2,
+                bar_btm + BAR_H / 2,
+                unit,
+                ha="center", va="center",
+                fontsize=9, fontweight="bold", color="black", zorder=5,
+                clip_on=True,
             )
-            ax.add_patch(stripe)
-
-        # ---- unit label centered across full operational span ----
-        t_first = int(segments[0]["Departure"])  - time_offset
-        t_last  = int(segments[-1]["Arrival"])   - time_offset
-        ax.text(
-            (t_first + t_last) / 2,
-            bar_btm + BAR_H / 2 - ACCENT_H / 2,
-            unit,
-            ha="center", va="center",
-            fontsize=9, fontweight="bold", color="black", zorder=5,
-            clip_on=True,
-        )
 
         # ---- collect stop events (station, time) for labels below bar ----
         # Each segment contributes its departure stop; the very last segment
@@ -245,10 +264,22 @@ def render(rows: list[dict], output_path: Path, time_offset: int, dpi: int, trai
         ax.axhline(y, color="#cccccc", linewidth=0.6, zorder=1)
 
     # Title
-    ax.set_title(
-        f"Train ID - {train_id_label}",
-        fontsize=12, fontweight="bold", pad=8,
-    )
+    resolved_title = chart_title if chart_title else f"Train ID - {train_id_label}"
+    ax.set_title(resolved_title, fontsize=12, fontweight="bold", pad=8)
+
+    if show_color_legend and color_palette:
+        legend_handles = [
+            Patch(facecolor=color, edgecolor="black", label=label)
+            for label, color in color_palette.items()
+        ]
+        ax.legend(
+            handles=legend_handles,
+            title=color_legend_title,
+            loc="upper left",
+            bbox_to_anchor=(1.01, 1.0),
+            borderaxespad=0.0,
+            fontsize=8,
+        )
 
     # Put x-axis on top as well (mirrors industry diagrams)
     ax.xaxis.set_ticks_position("both")
