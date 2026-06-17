@@ -1,5 +1,0 @@
-TripId,TrainCategory,TrainId,FromStation,ToStation,Departure,Arrival,Demand,Unit
-2,L,6,AR/86,VJ/86,254,304,54,ICU_1
-3,L,6,VJ/86,FA/86,306,321,58,ICU_1
-4,L,6,FA/86,CPH/86,327,452,246,ICU_1
-4,L,6,FA/86,CPH/86,327,452,246,ICU_2
