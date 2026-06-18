@@ -206,22 +206,16 @@ end
 
 # F. define storage variable - storage = night_capacity - coupled + uncoupled + extra (allow extra units, if necessary, but expensive)
 for n in 1:N
-    earlier_connections_v1 = [n2 for n2 in 1:N if
+    earlier_connections = [n2 for n2 in 1:N if
         (connections[n2, "ArrivalAtConnection"] <= connections[n, "DepartureFromConnection"])
         && (connections[n2, "ConnectionStation"] == connections[n, "ConnectionStation"])
     ]
 
-    earlier_connections_v2 = [n2 for n2 in 1:N if
-        (n2 == n) || (
-            (connections[n2, "ArrivalAtConnection"] + (connections[n2,"ToStation"] == "End" ? 0 : 60) <= connections[n, "DepartureFromConnection"])
-            && (connections[n2, "ConnectionStation"] == connections[n, "ConnectionStation"])
-        )
-    ]
     for m in 1:M
         @constraint(model, 
             storage[m, n] == extra_units[m, station_to_idx[connections[n, "ConnectionStation"]]] +
                 get(night_capacity_dict, (connections[n, "ConnectionStation"], RS_Data.Name[m]), (0, 0))[1]
-                + sum(v2[m, n2] for n2 in earlier_connections_v2) - sum(v1[m, n2] for n2 in earlier_connections_v1)
+                + sum(v2[m, n2] - v1[m, n2] for n2 in earlier_connections)
         )
     end
 end
@@ -262,7 +256,7 @@ end
 for n in 1:N
     @constraint(model, v1_happening[n]*5 >= sum(v1[m, n] for m in 1:M))
     @constraint(model, v2_happening[n]*5 >= sum(v2[m, n] for m in 1:M))
-    @constraint(model, v1_happening[n] + v2_happening[n] <= 1) # only coupling or decoupling can happen, not both
+    #@constraint(model, v1_happening[n] + v2_happening[n] <= 1) # only coupling or decoupling can happen, not both
 end
 
 # Solve the model
