@@ -1,25 +1,3 @@
-"""
-trainid_diagram.py
-==================
-Renders a railway timetable Gantt chart from an RSP output CSV.
-
-Layout (matching industry-style train diagrams):
-  - One horizontal lane per rolling-stock unit
-  - Each trip segment is a coloured rectangle spanning departure->arrival
-  - Station codes + times are annotated below each stop marker
-  - A thin accent stripe runs along the top of every bar
-
-X-axis : clock time (HH:MM, derived from integer minutes in the CSV)
-Y-axis : one row per unit, labelled inside the bar
-
-Usage
------
-    python trainid_diagram.py                                # uses defaults below
-    python trainid_diagram.py --input my.csv --output my.png
-    python trainid_diagram.py --train-id 6                  # outputs solution_trainid_6.png
-    python trainid_diagram.py --time-offset 240             # minute that maps to 00:00
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -141,6 +119,21 @@ def render(
     show_color_legend: bool = False,
     color_legend_title: str = "Items",
 ) -> None:
+    
+    # ==========================================================
+    # CENTRAL FONT CONTROL
+    # ==========================================================
+    FS = {
+        "title":   15,    # Chart title
+        "unit":    13,     # Unit name inside the bar
+        "station": 13,   # Station code below the bar
+        "time":    13,     # Time HH:MM below the station code
+        "axis":    13,     # X-axis time labels (top/bottom)
+        "legend":  15,      # Legend text
+        "legend_title": 15  # <--- ADD THIS LINE
+    }
+    # ==========================================================
+
     # ---- group by unit, preserve first-departure order ----
     unit_segs: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
@@ -198,14 +191,12 @@ def render(
                 bar_btm + BAR_H / 2,
                 unit,
                 ha="center", va="center",
-                fontsize=9, fontweight="bold", color="black", zorder=5,
+                fontsize=FS["unit"], fontweight="bold", color="black", zorder=5,
                 clip_on=True,
             )
 
         # ---- collect stop events (station, time) for labels below bar ----
-        # Each segment contributes its departure stop; the very last segment
-        # also contributes its arrival stop.
-        stops: list[tuple[int, str, str]] = []   # (time_adj, station, role)
+        stops: list[tuple[int, str, str]] = []
         for idx, seg in enumerate(segments):
             t0 = int(seg["Departure"]) - time_offset
             stops.append((t0, seg["FromStation"], "dep"))
@@ -213,11 +204,10 @@ def render(
                 t1 = int(seg["Arrival"]) - time_offset
                 stops.append((t1, seg["ToStation"], "arr"))
 
-        # Merge consecutive duplicate stations (shared stop between two segments)
         merged: list[tuple[int, str]] = []
         for t, station, _role in stops:
             if merged and merged[-1][1] == station and abs(merged[-1][0] - t) < 2:
-                pass   # same stop already recorded
+                pass
             else:
                 merged.append((t, station))
 
@@ -226,15 +216,14 @@ def render(
         label_y_time    = bar_btm - LABEL_GAP - 2 * LINE_H
 
         for t, station in merged:
-            # Small vertical tick from bar bottom down to station label
             ax.plot([t, t], [bar_btm, bar_btm - LABEL_GAP],
                     color="black", linewidth=0.8, zorder=6)
             ax.text(t, label_y_station, station,
                     ha="center", va="top",
-                    fontsize=7.5, color="black", zorder=6)
+                    fontsize=FS["station"], color="black", zorder=6)
             ax.text(t, label_y_time, format_minutes(t + time_offset),
                     ha="center", va="top",
-                    fontsize=7, color="#444444", zorder=6)
+                    fontsize=FS["time"], color="#444444", zorder=6)
 
     # ---- axes ----
     y_bottom = -0.25
@@ -242,30 +231,27 @@ def render(
     ax.set_xlim(t_min - t_span * 0.03, t_max + t_span * 0.03)
     ax.set_ylim(y_bottom, y_top)
 
-    # Hide y-axis ticks (labels live inside the bars)
     ax.set_yticks([])
     ax.yaxis.set_visible(False)
 
-    # X-axis: HH:MM ticks every 30 min, minor every 10 min
     ax.xaxis.set_major_locator(ticker.MultipleLocator(30))
     ax.xaxis.set_minor_locator(ticker.MultipleLocator(10))
     ax.xaxis.set_major_formatter(
         ticker.FuncFormatter(lambda x, _: format_minutes(x + time_offset))
     )
-    ax.tick_params(axis="x", which="major", labelsize=9)
+    ax.tick_params(axis="x", which="major", labelsize=FS["axis"])
     plt.setp(ax.get_xticklabels(), rotation=0)
 
     ax.grid(which="major", axis="x", linestyle="--", linewidth=0.5, alpha=0.45, zorder=0)
     ax.grid(which="minor", axis="x", linestyle=":",  linewidth=0.3, alpha=0.25, zorder=0)
 
-    # Horizontal row separator lines
     for row_idx in range(n_units + 1):
         y = row_idx * ROW_H
         ax.axhline(y, color="#cccccc", linewidth=0.6, zorder=1)
 
     # Title
     resolved_title = chart_title if chart_title else f"Train ID - {train_id_label}"
-    ax.set_title(resolved_title, fontsize=12, fontweight="bold", pad=8)
+    ax.set_title(resolved_title, fontsize=FS["title"], fontweight="bold", pad=8)
 
     if show_color_legend and color_palette:
         legend_handles = [
@@ -278,10 +264,10 @@ def render(
             loc="upper left",
             bbox_to_anchor=(1.01, 1.0),
             borderaxespad=0.0,
-            fontsize=8,
+            fontsize=FS["legend"],
+            title_fontsize=FS["legend_title"]
         )
 
-    # Put x-axis on top as well (mirrors industry diagrams)
     ax.xaxis.set_ticks_position("both")
     ax.tick_params(axis="x", which="both", top=True, bottom=True, labeltop=True, labelbottom=True)
 

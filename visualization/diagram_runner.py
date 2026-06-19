@@ -14,7 +14,7 @@ from pathlib import Path
 # Hardcoded Runner Settings
 # ---------------------------------------------------------------------------
 # Edit these values to run without CLI flags.
-HARDCODED_SOURCE_CSV = "UnitAssignment_GGV_2026-06-17_151805_processed.csv"                    # Optional fixed CSV filename. Empty -> auto-pick newest CSV.
+HARDCODED_SOURCE_CSV = "UnitAssignment_GGV_2026-06-19_115259_processed.csv"                    # Optional fixed CSV filename. Empty -> auto-pick newest CSV.
 HARDCODED_SCRIPT = "ggv"                  # "trainid", "unit", or "ggv"
 #for below:
 #unit=unit_type and number

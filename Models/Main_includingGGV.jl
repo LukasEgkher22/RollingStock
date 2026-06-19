@@ -112,7 +112,7 @@ set_optimizer_attribute(model, "MIPGap", 0.005) # 0.5% optimality gap
 # ----------- Objective -----------
 # Minimize total cost (km_costs * distance)
 @objective(model, Min, km_buff * sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:J) # distance costs for each composition used
-    + sum((v1_happening[n] + v2_happening[n]) * v_penalty for n in 1:N) # make coupling/decoupling less attractive
+    + sum((v1_happening[n] + v2_happening[n]) * v_penalty for n in actual_connections) # make coupling/decoupling less attractive
     + sum(extra_units[m, s] * extra_unit_penalty for m in 1:M, s in 1:S)
 )
 

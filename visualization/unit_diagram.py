@@ -109,6 +109,19 @@ def render(
     time_offset: int,
     dpi: int,
 ) -> None:
+
+    # ==========================================================
+    # CENTRAL FONT CONTROL
+    # ==========================================================
+    FS = {
+        "title":   12,    # Chart title
+        "train":   12,     # "Train ID" label inside the bar
+        "station": 12,   # Station code below the bar
+        "time":    12,     # Time HH:MM below the station code
+        "axis":    12,     # X-axis time labels (top/bottom)
+    }
+    # ==========================================================
+
     train_segs: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         train_segs[row["TrainId"]].append(row)
@@ -166,7 +179,7 @@ def render(
             f"Train {train_id}",
             ha="center",
             va="center",
-            fontsize=9,
+            fontsize=FS["train"],
             fontweight="bold",
             color="black",
             zorder=5,
@@ -192,14 +205,16 @@ def render(
 
         for t, station in merged:
             ax.plot([t, t], [bar_btm, bar_btm - LABEL_GAP], color="black", linewidth=0.8, zorder=6)
-            ax.text(t, label_y_station, station, ha="center", va="top", fontsize=7.5, color="black", zorder=6)
+            ax.text(t, label_y_station, station, 
+                    ha="center", va="top", 
+                    fontsize=FS["station"], color="black", zorder=6)
             ax.text(
                 t,
                 label_y_time,
                 format_minutes(t + time_offset),
                 ha="center",
                 va="top",
-                fontsize=7,
+                fontsize=FS["time"],
                 color="#444444",
                 zorder=6,
             )
@@ -215,7 +230,7 @@ def render(
     ax.xaxis.set_major_locator(ticker.MultipleLocator(30))
     ax.xaxis.set_minor_locator(ticker.MultipleLocator(10))
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: format_minutes(x + time_offset)))
-    ax.tick_params(axis="x", which="major", labelsize=9)
+    ax.tick_params(axis="x", which="major", labelsize=FS["axis"])
     plt.setp(ax.get_xticklabels(), rotation=0)
 
     ax.grid(which="major", axis="x", linestyle="--", linewidth=0.5, alpha=0.45, zorder=0)
@@ -229,7 +244,7 @@ def render(
     unit_label = ", ".join(units)
     ax.set_title(
         f"{unit_label} across Train IDs",
-        fontsize=12,
+        fontsize=FS["title"],
         fontweight="bold",
         pad=8,
     )
