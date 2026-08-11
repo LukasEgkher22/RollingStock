@@ -103,6 +103,159 @@ def _trainid_sort_key(train_id: str) -> tuple[int, int | str]:
     return (1, text)
 
 
+# def render(
+#     rows: list[dict],
+#     output_path: Path,
+#     time_offset: int,
+#     dpi: int,
+# ) -> None:
+
+#     # ==========================================================
+#     # CENTRAL FONT CONTROL
+#     # ==========================================================
+#     FS = {
+#         "title":   12,    # Chart title
+#         "train":   12,     # "Train ID" label inside the bar
+#         "station": 12,   # Station code below the bar
+#         "time":    12,     # Time HH:MM below the station code
+#         "axis":    12,     # X-axis time labels (top/bottom)
+#     }
+#     # ==========================================================
+
+#     train_segs: dict[str, list[dict]] = defaultdict(list)
+#     for row in rows:
+#         train_segs[row["TrainId"]].append(row)
+
+#     # Keep color assignment deterministic: lowest TrainId gets first palette color.
+#     train_ids = sorted(train_segs, key=_trainid_sort_key)
+
+#     n_rows = len(train_ids)
+#     all_times = [int(r["Departure"]) - time_offset for r in rows] + [
+#         int(r["Arrival"]) - time_offset for r in rows
+#     ]
+#     t_min, t_max = min(all_times), max(all_times)
+#     t_span = max(1, t_max - t_min)
+
+#     fig_w = max(12, t_span / 15)
+#     fig_h = max(3, n_rows * ROW_H * 1.6 + 1.5)
+#     fig, ax = plt.subplots(figsize=(fig_w, fig_h), constrained_layout=True)
+
+#     for row_idx, train_id in enumerate(train_ids):
+#         fill_color, accent_color = _PALETTES[row_idx % len(_PALETTES)]
+#         segments = sorted(train_segs[train_id], key=lambda r: int(r["Departure"]))
+
+#         bar_btm = _bar_bottom(row_idx)
+
+#         t_first = int(segments[0]["Departure"]) - time_offset
+#         t_last = int(segments[-1]["Arrival"]) - time_offset
+
+#         # Render one task per TrainId using full occupancy window.
+#         main_bar = FancyBboxPatch(
+#             (t_first, bar_btm),
+#             t_last - t_first,
+#             BAR_H,
+#             boxstyle="square,pad=0",
+#             facecolor=fill_color,
+#             edgecolor="black",
+#             linewidth=0.6,
+#             zorder=3,
+#         )
+#         ax.add_patch(main_bar)
+
+#         top_stripe = FancyBboxPatch(
+#             (t_first, bar_btm + BAR_H - ACCENT_H),
+#             t_last - t_first,
+#             ACCENT_H,
+#             boxstyle="square,pad=0",
+#             facecolor=accent_color,
+#             edgecolor="none",
+#             zorder=4,
+#         )
+#         ax.add_patch(top_stripe)
+
+#         ax.text(
+#             (t_first + t_last) / 2,
+#             bar_btm + BAR_H / 2 - ACCENT_H / 2,
+#             f"Train {train_id}",
+#             ha="center",
+#             va="center",
+#             fontsize=FS["train"],
+#             fontweight="bold",
+#             color="black",
+#             zorder=5,
+#             clip_on=True,
+#         )
+
+#         stops: list[tuple[int, str]] = []
+#         for idx, seg in enumerate(segments):
+#             dep = int(seg["Departure"]) - time_offset
+#             stops.append((dep, seg["FromStation"]))
+#             if idx == len(segments) - 1:
+#                 arr = int(seg["Arrival"]) - time_offset
+#                 stops.append((arr, seg["ToStation"]))
+
+#         merged: list[tuple[int, str]] = []
+#         for t, station in stops:
+#             if merged and merged[-1][1] == station and abs(merged[-1][0] - t) < 2:
+#                 continue
+#             merged.append((t, station))
+
+#         label_y_station = bar_btm - LABEL_GAP - LINE_H
+#         label_y_time = bar_btm - LABEL_GAP - 2 * LINE_H
+
+#         for t, station in merged:
+#             ax.plot([t, t], [bar_btm, bar_btm - LABEL_GAP], color="black", linewidth=0.8, zorder=6)
+#             ax.text(t, label_y_station, station, 
+#                     ha="center", va="top", 
+#                     fontsize=FS["station"], color="black", zorder=6)
+#             ax.text(
+#                 t,
+#                 label_y_time,
+#                 format_minutes(t + time_offset),
+#                 ha="center",
+#                 va="top",
+#                 fontsize=FS["time"],
+#                 color="#444444",
+#                 zorder=6,
+#             )
+
+#     y_bottom = -0.25
+#     y_top = n_rows * ROW_H + 0.1
+#     ax.set_xlim(t_min - t_span * 0.03, t_max + t_span * 0.03)
+#     ax.set_ylim(y_bottom, y_top)
+
+#     ax.set_yticks([])
+#     ax.yaxis.set_visible(False)
+
+#     ax.xaxis.set_major_locator(ticker.MultipleLocator(30))
+#     ax.xaxis.set_minor_locator(ticker.MultipleLocator(10))
+#     ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: format_minutes(x + time_offset)))
+#     ax.tick_params(axis="x", which="major", labelsize=FS["axis"])
+#     plt.setp(ax.get_xticklabels(), rotation=0)
+
+#     ax.grid(which="major", axis="x", linestyle="--", linewidth=0.5, alpha=0.45, zorder=0)
+#     ax.grid(which="minor", axis="x", linestyle=":", linewidth=0.3, alpha=0.25, zorder=0)
+
+#     for row_idx in range(n_rows + 1):
+#         y = row_idx * ROW_H
+#         ax.axhline(y, color="#cccccc", linewidth=0.6, zorder=1)
+
+#     units = sorted({r["Unit"] for r in rows})
+#     unit_label = ", ".join(units)
+#     ax.set_title(
+#         f"{unit_label} across Train IDs",
+#         fontsize=FS["title"],
+#         fontweight="bold",
+#         pad=8,
+#     )
+
+#     ax.xaxis.set_ticks_position("both")
+#     ax.tick_params(axis="x", which="both", top=True, bottom=True, labeltop=True, labelbottom=True)
+
+#     output_path.parent.mkdir(parents=True, exist_ok=True)
+#     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+#     plt.close(fig)
+#     print(f"Saved diagram to {output_path}")
 def render(
     rows: list[dict],
     output_path: Path,
@@ -114,11 +267,11 @@ def render(
     # CENTRAL FONT CONTROL
     # ==========================================================
     FS = {
-        "title":   12,    # Chart title
-        "train":   12,     # "Train ID" label inside the bar
-        "station": 12,   # Station code below the bar
-        "time":    12,     # Time HH:MM below the station code
-        "axis":    12,     # X-axis time labels (top/bottom)
+        "title":   14,    # Slightly larger for PPT
+        "train":   11,    
+        "station": 10,   
+        "time":    9,     
+        "axis":    11,    
     }
     # ==========================================================
 
@@ -126,30 +279,41 @@ def render(
     for row in rows:
         train_segs[row["TrainId"]].append(row)
 
-    # Keep color assignment deterministic: lowest TrainId gets first palette color.
     train_ids = sorted(train_segs, key=_trainid_sort_key)
-
     n_rows = len(train_ids)
+
+    # Calculate time span
     all_times = [int(r["Departure"]) - time_offset for r in rows] + [
         int(r["Arrival"]) - time_offset for r in rows
     ]
     t_min, t_max = min(all_times), max(all_times)
     t_span = max(1, t_max - t_min)
 
-    fig_w = max(12, t_span / 15)
-    fig_h = max(3, n_rows * ROW_H * 1.6 + 1.5)
+    # --- POWERPOINT OPTIMIZED SIZING ---
+    # Standard PPT slide is 16:9. We'll use 16 inches as base width.
+    BASE_W = 16.0
+    BASE_H = 9.0
+    
+    # We want each row to have a "natural" height of about 1.2 inches 
+    # to look good on a slide. 
+    ideal_h = (n_rows * 1.2) + 2.0 # +2 for margins/titles
+    
+    fig_w = BASE_W
+    fig_h = max(BASE_H, ideal_h) 
+
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), constrained_layout=True)
 
     for row_idx, train_id in enumerate(train_ids):
         fill_color, accent_color = _PALETTES[row_idx % len(_PALETTES)]
         segments = sorted(train_segs[train_id], key=lambda r: int(r["Departure"]))
-
-        bar_btm = _bar_bottom(row_idx)
+        
+        # We invert the index so the first train in the list is at the TOP
+        display_idx = (n_rows - 1) - row_idx
+        bar_btm = _bar_bottom(display_idx)
 
         t_first = int(segments[0]["Departure"]) - time_offset
         t_last = int(segments[-1]["Arrival"]) - time_offset
 
-        # Render one task per TrainId using full occupancy window.
         main_bar = FancyBboxPatch(
             (t_first, bar_btm),
             t_last - t_first,
@@ -157,7 +321,7 @@ def render(
             boxstyle="square,pad=0",
             facecolor=fill_color,
             edgecolor="black",
-            linewidth=0.6,
+            linewidth=0.8,
             zorder=3,
         )
         ax.add_patch(main_bar)
@@ -177,15 +341,12 @@ def render(
             (t_first + t_last) / 2,
             bar_btm + BAR_H / 2 - ACCENT_H / 2,
             f"Train {train_id}",
-            ha="center",
-            va="center",
-            fontsize=FS["train"],
-            fontweight="bold",
-            color="black",
-            zorder=5,
-            clip_on=True,
+            ha="center", va="center",
+            fontsize=FS["train"], fontweight="bold",
+            color="black", zorder=5, clip_on=True,
         )
 
+        # Handle Station Labels
         stops: list[tuple[int, str]] = []
         for idx, seg in enumerate(segments):
             dep = int(seg["Departure"]) - time_offset
@@ -204,50 +365,49 @@ def render(
         label_y_time = bar_btm - LABEL_GAP - 2 * LINE_H
 
         for t, station in merged:
-            ax.plot([t, t], [bar_btm, bar_btm - LABEL_GAP], color="black", linewidth=0.8, zorder=6)
-            ax.text(t, label_y_station, station, 
-                    ha="center", va="top", 
+            ax.plot([t, t], [bar_btm, bar_btm - LABEL_GAP/2], color="black", linewidth=0.8, zorder=6)
+            ax.text(t, label_y_station, station, ha="center", va="top", 
                     fontsize=FS["station"], color="black", zorder=6)
-            ax.text(
-                t,
-                label_y_time,
-                format_minutes(t + time_offset),
-                ha="center",
-                va="top",
-                fontsize=FS["time"],
-                color="#444444",
-                zorder=6,
-            )
+            ax.text(t, label_y_time, format_minutes(t + time_offset),
+                    ha="center", va="top", fontsize=FS["time"], color="#444444", zorder=6)
 
-    y_bottom = -0.25
-    y_top = n_rows * ROW_H + 0.1
-    ax.set_xlim(t_min - t_span * 0.03, t_max + t_span * 0.03)
-    ax.set_ylim(y_bottom, y_top)
+    # --- VERTICAL CENTERING LOGIC ---
+    # We want the content to be centered in the 16:9 frame.
+    # Total data height used is n_rows * ROW_H.
+    # We calculate a y_limit that adds equal padding top and bottom.
+    content_top = n_rows * ROW_H
+    
+    # Calculate how many "extra" rows we need to fill the aspect ratio
+    # This prevents bars from stretching vertically when there's only 1 train
+    aspect_ratio_data_height = (fig_h / fig_w) * t_span * 0.12 # Rough conversion factor
+    
+    # Simpler approach: fixed padding based on number of rows
+    # If rows < 6, we pad the ylim to keep the bars at a consistent thickness
+    padding = max(1.0, (6 - n_rows) * 0.5) if n_rows < 6 else 0.5
+    
+    ax.set_ylim(-padding, content_top + padding)
+    ax.set_xlim(t_min - t_span * 0.05, t_max + t_span * 0.05)
 
     ax.set_yticks([])
     ax.yaxis.set_visible(False)
 
-    ax.xaxis.set_major_locator(ticker.MultipleLocator(30))
-    ax.xaxis.set_minor_locator(ticker.MultipleLocator(10))
+    # Grid and Ticks
+    ax.xaxis.set_major_locator(ticker.MultipleLocator(60)) # Every hour
+    ax.xaxis.set_minor_locator(ticker.MultipleLocator(15)) # Every 15 mins
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: format_minutes(x + time_offset)))
     ax.tick_params(axis="x", which="major", labelsize=FS["axis"])
-    plt.setp(ax.get_xticklabels(), rotation=0)
+    
+    ax.grid(which="major", axis="x", linestyle="-", linewidth=0.5, color="#dddddd", zorder=0)
+    ax.grid(which="minor", axis="x", linestyle=":", linewidth=0.3, color="#eeeeee", zorder=0)
 
-    ax.grid(which="major", axis="x", linestyle="--", linewidth=0.5, alpha=0.45, zorder=0)
-    ax.grid(which="minor", axis="x", linestyle=":", linewidth=0.3, alpha=0.25, zorder=0)
-
+    # Row separators
     for row_idx in range(n_rows + 1):
         y = row_idx * ROW_H
-        ax.axhline(y, color="#cccccc", linewidth=0.6, zorder=1)
+        ax.axhline(y, color="#eeeeee", linewidth=1.0, zorder=1)
 
     units = sorted({r["Unit"] for r in rows})
     unit_label = ", ".join(units)
-    ax.set_title(
-        f"{unit_label} across Train IDs",
-        fontsize=FS["title"],
-        fontweight="bold",
-        pad=8,
-    )
+    ax.set_title(f"Unit Schedule: {unit_label}", fontsize=FS["title"], fontweight="bold", pad=20)
 
     ax.xaxis.set_ticks_position("both")
     ax.tick_params(axis="x", which="both", top=True, bottom=True, labeltop=True, labelbottom=True)
@@ -255,8 +415,6 @@ def render(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved diagram to {output_path}")
-
 
 def main() -> None:
     script_dir = Path(__file__).resolve().parent

@@ -75,7 +75,7 @@ electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (com
 # define penalty parameters for coupling and decoupling (example: 100 per unit)
 v_penalty = 100
 extra_unit_penalty = 100000
-km_buff = 0.1 # multiplier for km costs to make them more comparable to the penalties
+km_buff = 0.001 # multiplier for km costs to make them more comparable to the penalties
 
 timetable_data.Index = 1:J
 

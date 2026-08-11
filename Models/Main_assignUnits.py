@@ -3,7 +3,7 @@ import os
 from AssignUnits_functions import assign_unit_ids, process_unit_swaps
 
 # TODO: Change the file name of the composition solution here
-solution = "CompAssignments_SimpleModel_2026-06-10_095111.csv"
+solution = "CompAssignments_SimpleModel_2026-06-19_123545.csv"
 
 # Path Setup
 current_dir = os.path.dirname(os.path.abspath(__file__))

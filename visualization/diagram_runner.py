@@ -15,12 +15,12 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Edit these values to run without CLI flags.
 HARDCODED_SOURCE_CSV = "UnitAssignment_GGV_2026-06-19_115259_processed.csv"                    # Optional fixed CSV filename. Empty -> auto-pick newest CSV.
-HARDCODED_SCRIPT = "ggv"                  # "trainid", "unit", or "ggv"
+HARDCODED_SCRIPT = "trainid"                  # "trainid", "unit", or "ggv"
 #for below:
 #unit=unit_type and number
 #trainid=number
 #ggv= number_number_... depending on how long the ggv is
-HARDCODED_VALUE = "10_910"                  # unit=unit_type and numberTrainId, Unit, or GGV value depending on script mode
+HARDCODED_VALUE = "6"                  # unit=unit_type and numberTrainId, Unit, or GGV value depending on script mode
 HARDCODED_FILTERED_OUTPUT = ""
 HARDCODED_CHART_OUTPUT = ""
 HARDCODED_TIME_OFFSET = 0

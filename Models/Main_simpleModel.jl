@@ -74,7 +74,7 @@ electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (com
 v_penalty = 100
 end_of_day_penalty = 100000
 extra_unit_penalty = 100000
-km_buff = 0.1 # multiplier for km costs to make them more comparable to the penalties
+km_buff = 0.001 # multiplier for km costs to make them more comparable to the penalties
 
 timetable_data.Index = 1:J
 
@@ -128,8 +128,8 @@ for j in 1:J
             end
         end
     elseif timetable_data.TrainCategory[j] == "M" # in this simple model we do not want to use material trains
-        fix(y[empty_comp_idx, j], 1; force=true)
-        # continue
+        #fix(y[empty_comp_idx, j], 1; force=true)
+        continue
     else
         fix(y[empty_comp_idx, j], 0; force=true)
     end
