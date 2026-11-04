@@ -75,7 +75,7 @@ electrified_comps = [c for c in 1:C if any((RS_Data.Electrified[m] == 1) && (com
 # define penalty parameters for coupling and decoupling (example: 100 per unit)
 v_penalty = 100
 extra_unit_penalty = 100000
-km_buff = 0.001 # multiplier for km costs to make them more comparable to the penalties
+km_buff = 0.1 # multiplier for km costs to make them more comparable to the penalties
 
 timetable_data.Index = 1:J
 
@@ -129,7 +129,8 @@ for j in 1:J
         continue
         # M trains can be left empty or assigned a composition
     else
-        fix(y[empty_comp_idx, j], 0; force=true)
+        #fix(y[empty_comp_idx, j], 0; force=true)
+        continue
     end
 end
 
@@ -190,7 +191,7 @@ end
 
 # D. Demand Coverage
 for j in 1:J
-    @constraint(model, sum(y[c, j] * comp_seats[c] for c in 1:C) >= timetable_data.Demand[j])
+    @constraint(model, sum(y[c, j] * comp_seats[c] for c in 1:C) >= timetable_data.Demand[j]*1.1)
 end
 
 # E. Global Station Balance (Type-based overnight requirement)
@@ -206,7 +207,7 @@ for n in 1:N
 
     earlier_connections_v2 = [n2 for n2 in 1:N if
         (n2 == n) || (
-            (connections[n2, "ArrivalAtConnection"] + (connections[n2,"ToStation"] == "End" ? 0 : 60) <= connections[n, "DepartureFromConnection"])
+            (connections[n2, "ArrivalAtConnection"]  <= connections[n, "DepartureFromConnection"]) # + (connections[n2,"ToStation"] == "End" ? 0 : 60)
             && (connections[n2, "ConnectionStation"] == connections[n, "ConnectionStation"])
         )
     ]

@@ -187,6 +187,225 @@ end
 
 
 """
+Determines which composition transitions are operationally feasible.
+
+A transition from composition `c_from` to `c_to` is feasible if it consists of either only
+coupling or only decoupling (or no change at all). Mixed transitions, where some units are
+coupled and others decoupled in the same connection, are not allowed.
+
+# Arguments
+- `counts_per_comp::Matrix{Int}`: The signature matrix from `get_normalized_compositions`
+  mapping composition indices to unit counts
+
+# Returns
+- `feasible::Matrix{Bool}`: A matrix where `feasible[c_from, c_to]` is true if the transition
+  is allowed
+"""
+function get_feasible_transitions(counts_per_comp)
+    C = size(counts_per_comp, 1)
+    feasible = falses(C, C)
+
+    for c_from in 1:C, c_to in 1:C
+        diff = counts_per_comp[c_to, :] .- counts_per_comp[c_from, :]
+        # only coupling (all diffs >= 0) or only decoupling (all diffs <= 0)
+        feasible[c_from, c_to] = all(diff .>= 0) || all(diff .<= 0)
+    end
+
+    return feasible
+end
+
+
+"""
+Builds composition definitions where the order of the units matters.
+
+In contrast to `get_normalized_compositions`, "ICA-ERF" and "ERF-ICA" are kept as two different
+compositions. The units are listed from the front to the rear of the train in driving direction.
+
+# Arguments
+- `compositions_raw::Vector{String}`: A list of raw composition strings (e.g., ["ICA-ERF", "ERF-ICA"])
+- `unit_names::Vector{String}`: A list of all possible unit type identifiers
+
+# Returns
+- `compositions::Vector{String}`: A list of unique composition strings
+- `comp_units::Vector{Vector{String}}`: The ordered units of each composition (empty for "empty")
+- `counts_matrix::Matrix{Int}`: A 2D matrix where `counts_matrix[c, m]` is the number of
+  units of type `m` present in composition `c`
+"""
+function get_ordered_compositions(compositions_raw, unit_names)
+    compositions = unique(String.(compositions_raw))
+    comp_units = [c == "empty" ? String[] : String.(split(c, "-")) for c in compositions]
+    counts_matrix = [count(==(u), units) for units in comp_units, u in unit_names]
+
+    return compositions, comp_units, counts_matrix
+end
+
+
+"""
+Finds the train system (e.g. "IC100") of a train based on its category and train number.
+
+# Arguments
+- `train_id::Int`: The train number
+- `category::String`: The train category (e.g. "IC"), needed since number ranges overlap between categories
+- `system_mapping::DataFrame`: The "Train system mapping" sheet
+
+# Returns
+- `String` with the system name, or `nothing` if no system matches
+"""
+function get_train_system(train_id, category, system_mapping)
+    for row in eachrow(system_mapping)
+        if string(row.Category) == category && row."From number" <= train_id <= row."To number"
+            return string(row."System name")
+        end
+    end
+    return nothing
+end
+
+
+"""
+Checks if composition `units_from` can be turned into `units_to` with a given shunting operation.
+
+Only one operation is allowed per connection: coupling at the front, coupling at the rear,
+decoupling at the front, decoupling at the rear, or no change. The operation is applied in the
+arrival direction. If the train turns (e.g. shunt code "Vka"), the composition is reversed
+afterwards, so the front becomes the rear.
+
+# Arguments
+- `units_from::Vector{String}`: Ordered units of the arriving composition
+- `units_to::Vector{String}`: Ordered units of the departing composition
+- `rule::NamedTuple`: Shunting rule from `get_shunt_rules`
+
+# Returns
+- `Bool`: true if the transition is feasible
+"""
+function is_feasible_shunt(units_from, units_to, rule)
+    # departing composition seen in the arrival direction
+    target = rule.turn ? reverse(units_to) : units_to
+    n_from = length(units_from)
+    n_to = length(units_to)
+    k = n_to - n_from
+
+    if target == units_from
+        return true
+    elseif k > 0 # coupling k units
+        return (k <= rule.couple_front && target[k+1:end] == units_from) ||
+               (k <= rule.couple_rear && target[1:n_from] == units_from)
+    elseif k < 0 # decoupling -k units
+        return (-k <= rule.uncouple_front && units_from[-k+1:end] == target) ||
+               (-k <= rule.uncouple_rear && units_from[1:n_to] == target)
+    end
+    return false
+end
+
+
+"""
+Reads the shunting rules (max. units coupled/decoupled at front/rear, turning) for each shunt code.
+
+# Arguments
+- `shunting_operations::DataFrame`: The "Shunting operations" sheet
+
+# Returns
+- `Dict{String, NamedTuple}`: Maps shunt code to its rule
+"""
+function get_shunt_rules(shunting_operations)
+    return Dict(
+        string(row."Shunt code") => (
+            couple_front = Int(row."Couple front"),
+            uncouple_front = Int(row."Uncouple front"),
+            couple_rear = Int(row."Couple rear"),
+            uncouple_rear = Int(row."Uncouple rear"),
+            turn = Bool(row."Turn 1st outgoing")
+        )
+        for row in eachrow(shunting_operations)
+    )
+end
+
+
+"""
+Determines the feasible composition transitions (c1, c2) for every connection.
+
+The shunt code of a connection is looked up in the "Trip cutpoints" sheet based on the train
+system and the connection station (e.g. "aGk" for trains passing through, "Vka" for reversing
+trains). For merged TrainIds (e.g. "11_4011") all parts are checked. Connections from "Start"
+or to "End" are not checked, since the incoming or outgoing composition is always empty.
+Connections without a shunt code (code "None") do not allow any change of the composition.
+If the parts of a merged TrainId give different shunt codes, an error is thrown.
+
+# Arguments
+- `connections::DataFrame`: Connections from `build_connections`
+- `timetable_data::DataFrame`: Timetable, used to get the train category of each train
+- `comp_units::Vector{Vector{String}}`: Ordered units per composition from `get_ordered_compositions`
+- `cutpoints::DataFrame`: The "Trip cutpoints" sheet
+- `shunting_operations::DataFrame`: The "Shunting operations" sheet
+- `system_mapping::DataFrame`: The "Train system mapping" sheet
+
+# Returns
+- `feasible_pairs::Vector{Vector{Tuple{Int, Int}}}`: For each connection n, all feasible (c1, c2)
+- `connection_codes::Vector{String}`: For each connection n, the shunt code that was used
+"""
+function get_feasible_transitions_per_connection(connections, timetable_data, comp_units, cutpoints,
+                                                 shunting_operations, system_mapping)
+    C = length(comp_units)
+    empty_idx = findfirst(isempty, comp_units)
+
+    shunt_rules = get_shunt_rules(shunting_operations)
+    station_codes = Dict(
+        (string(row.TrainSystem), string(row."Cut station")) => string(row."Shunt code")
+        for row in eachrow(cutpoints)
+    )
+    train_category = Dict(string(row.TrainId) => string(row.TrainCategory) for row in eachrow(timetable_data))
+
+    # the feasible transitions only depend on the shunt code, so compute them once per code
+    pairs_per_code = Dict(
+        code => [(c1, c2) for c1 in 1:C, c2 in 1:C if is_feasible_shunt(comp_units[c1], comp_units[c2], rule)]
+        for (code, rule) in shunt_rules
+    )
+
+    N = nrow(connections)
+    feasible_pairs = Vector{Vector{Tuple{Int, Int}}}(undef, N)
+    connection_codes = Vector{String}(undef, N)
+    ambiguous_codes = String[]
+
+    for n in 1:N
+        if connections[n, "FromStation"] == "Start"
+            connection_codes[n] = "Start"
+            feasible_pairs[n] = [(empty_idx, c2) for c2 in 1:C]
+        elseif connections[n, "ToStation"] == "End"
+            connection_codes[n] = "End"
+            feasible_pairs[n] = [(c1, empty_idx) for c1 in 1:C]
+        else
+            # merged TrainIds (e.g. "11_4011") consist of several train numbers, check all of them
+            train_id = string(connections[n, "TrainId"])
+            station = string(connections[n, "ConnectionStation"])
+            codes = String[]
+            for part in split(train_id, "_")
+                system = get_train_system(parse(Int, part), train_category[train_id], system_mapping)
+                haskey(station_codes, (system, station)) && push!(codes, station_codes[(system, station)])
+            end
+            unique!(codes)
+
+            if isempty(codes)
+                # no shunt code for this station and train system -> composition is not allowed to change
+                connection_codes[n] = "None"
+                feasible_pairs[n] = [(c, c) for c in 1:C]
+            elseif length(codes) == 1
+                connection_codes[n] = codes[1]
+                feasible_pairs[n] = pairs_per_code[codes[1]]
+            else
+                push!(ambiguous_codes, "connection $n: TrainId $train_id at $station -> shunt codes $codes")
+            end
+        end
+    end
+
+    if !isempty(ambiguous_codes)
+        error("$(length(ambiguous_codes)) connections have more than one shunt code in 'Trip cutpoints':\n" *
+              join(ambiguous_codes, "\n"))
+    end
+
+    return feasible_pairs, connection_codes
+end
+
+
+"""
 Calculates operational details for each rolling stock composition.
 
 This function computes aggregated metrics for each composition by summing unit-level 

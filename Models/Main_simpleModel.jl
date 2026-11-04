@@ -1,10 +1,15 @@
 using CSV
 using DataFrames
 using JuMP
-using Gurobi
+import Gurobi
+import HiGHS
 using XLSX
 import Dates
 
+# solver settings: "Gurobi" (needs a license) or "HiGHS" (free)
+solver = "Gurobi"
+mip_gap = 0.005    # 0.5% optimality gap
+time_limit = 3600  # in seconds
 
 project_root = dirname(@__DIR__)
 
@@ -22,6 +27,9 @@ excel_file = XLSX.readxlsx(joinpath(project_root, "Data", "Base Day TUE.xlsx"))
 RS_Data = DataFrame(XLSX.gettable(excel_file["Rolling Stock"]))
 compositions_raw = DataFrame(XLSX.gettable(excel_file["Composition groups"], header=false))[!, 1]
 night_capacity = DataFrame(XLSX.gettable(excel_file["Night capacity"]))
+cutpoints = DataFrame(XLSX.gettable(excel_file["Trip cutpoints"]))
+shunting_operations = DataFrame(XLSX.gettable(excel_file["Shunting operations"]))
+system_mapping = DataFrame(XLSX.gettable(excel_file["Train system mapping"]))
 night_capacity_dict = Dict(
     (row.Station, row."Rolling stock types") => (row."Start Limit (count)", row."End Limit (count)") 
     for row in eachrow(night_capacity)
@@ -53,16 +61,36 @@ S = length(stations)
 
 actual_connections = [n for n in 1:N if connections[n, "FromStation"] != "Start" && connections[n, "ToStation"] != "End"]
 
-# Create unique composition names by sorting the units in the composition (e.g., "ICA-ERF" and "ERF-ICA" both become "1xERF, 1xICA")
+# Get compositions where the order of the units matters (e.g., "ICA-ERF" and "ERF-ICA" are different compositions)
 # and get the counts of each unit in each composition
-compositions, comp_number = get_normalized_compositions(compositions_raw, RS_Data.Name)
+compositions, comp_units, comp_number = get_ordered_compositions(compositions_raw, RS_Data.Name)
 
 C = length(compositions)
 
 empty_comp_idx = findfirst(==( "empty"), compositions)
 
+# Normalized composition names (e.g. "1xERF, 1xICA") for the output, so the visualization scripts keep working
+normalized_names = [c == empty_comp_idx ? "empty" :
+    join(sort(["$(comp_number[c, m])x$(RS_Data.Name[m])" for m in 1:M if comp_number[c, m] > 0]), ", ")
+    for c in 1:C]
+
 # Get coupling and decoupling matrices [1:M, 1:C, 1:C]
 coupled_dict, decoupled_dict = get_coupling_matrices(comp_number, RS_Data.Name)
+
+# Get feasible composition transitions (c1, c2) for each connection based on the shunt code of the connection station
+# aGk: train passes through, coupling at the front, decoupling at the rear
+# Vka: train reverses, coupling and decoupling at the front, afterwards the composition is reversed
+# no shunt code: the composition is not allowed to change
+feasible_pairs, connection_codes = get_feasible_transitions_per_connection(
+    connections, timetable_data, comp_units, cutpoints, shunting_operations, system_mapping
+)
+x_index = [(c1, c2, n) for n in 1:N for (c1, c2) in feasible_pairs[n]]
+
+# Transitions without coupling or decoupling: the composition stays identical, or is exactly reversed if the train turns
+shunt_rules = get_shunt_rules(shunting_operations)
+turns(n) = haskey(shunt_rules, connection_codes[n]) && shunt_rules[connection_codes[n]].turn
+no_change_pairs = [[(c1, c2) for (c1, c2) in feasible_pairs[n]
+                    if comp_units[c2] == (turns(n) ? reverse(comp_units[c1]) : comp_units[c1])] for n in 1:N]
 
 # Get composition costs per kilometer [1:C]
 comp_costs, comp_seats = get_composition_details(compositions, RS_Data[!, ["Kilometer costs", "Seats"]], comp_number)
@@ -81,23 +109,34 @@ timetable_data.Index = 1:J
 # -----------------------------------------------------------
 # CREATE MODEL
 # -----------------------------------------------------------
-model = Model(Gurobi.Optimizer)
-set_optimizer_attribute(model, "MIPGap", 0.005) # 0.5% optimality gap
+if solver == "Gurobi"
+    model = Model(Gurobi.Optimizer)
+    set_optimizer_attribute(model, "MIPGap", mip_gap)
+    set_optimizer_attribute(model, "TimeLimit", time_limit)
+elseif solver == "HiGHS"
+    model = Model(HiGHS.Optimizer)
+    set_optimizer_attribute(model, "mip_rel_gap", mip_gap)
+    set_optimizer_attribute(model, "time_limit", Float64(time_limit))
+else
+    error("Unknown solver: $solver")
+end
 
 # ----------- Variables -----------
 
 # y[c, j] = 1 if trip j is served by composition c
 @variable(model, y[c=1:C, j=1:J], Bin)
 
-# x[c1, c2, n] = 1 if composition c1 and composition c2 are used for connection n 
-@variable(model, x[c1=1:C, c2=1:C, n=1:N], Bin)
+# x[(c1, c2, n)] = 1 if composition c1 and composition c2 are used for connection n
+# only defined for feasible transitions (c1, c2) of connection n
+@variable(model, x[x_index], Bin)
 
 # v1[m, n] defines how many units of type m are coupled in connection n, v2 for decoupling
 @variable(model, v1[m=1:M, n=1:N] >= 0)
 @variable(model, v2[m=1:M, n=1:N] >= 0)
 
-@variable(model, v1_happening[n=1:N], Bin)
-@variable(model, v2_happening[n=1:N], Bin)
+# shunting[n] = 1 if coupling or decoupling happens in connection n
+# exactly one x is 1 per connection, so shunting happens if it is not one of the no-change transitions
+@expression(model, shunting[n=1:N], 1 - sum(x[(c1, c2, n)] for (c1, c2) in no_change_pairs[n]))
 
 # storage[m, n] - non-negative number of units of type m stored at the station of connection n (after coupling and decoupling)
 @variable(model, storage[m=1:M, n=1:N] >= 0)
@@ -113,7 +152,7 @@ set_optimizer_attribute(model, "MIPGap", 0.005) # 0.5% optimality gap
 # ----------- Objective -----------
 # Minimize total cost (km_costs * distance)
 @objective(model, Min, km_buff * sum(y[c,j] * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:J) # distance costs for each composition used
-    + sum((v1_happening[n] + v2_happening[n]) * v_penalty for n in actual_connections) # make coupling/decoupling less attractive
+    + sum(shunting[n] * v_penalty for n in actual_connections) # make coupling/decoupling less attractive
     + sum((balance_shortage[m, s] + balance_excess[m, s]) * end_of_day_penalty for m in 1:M, s in 1:S)
     + sum(extra_units[m, s] * extra_unit_penalty for m in 1:M, s in 1:S)
 )
@@ -157,7 +196,7 @@ for j in 1:J
 
     if length(connections_first) == 1
         for c in 1:C
-            @constraint(model, sum(x[c, c2, n] for c2 in 1:C, n in connections_first) == y[c, j])
+            @constraint(model, sum(x[(c1, c2, n)] for n in connections_first for (c1, c2) in feasible_pairs[n] if c1 == c) == y[c, j])
         end
     elseif length(connections_first) == 0
         if timetable_data.ToStation[j] != "End"
@@ -172,7 +211,7 @@ for j in 1:J
 
     if length(connections_second) == 1
         for c in 1:C
-            @constraint(model, sum(x[c1, c, n] for c1 in 1:C, n in connections_second) == y[c, j])
+            @constraint(model, sum(x[(c1, c2, n)] for n in connections_second for (c1, c2) in feasible_pairs[n] if c2 == c) == y[c, j])
         end
     elseif length(connections_second) == 0
         if timetable_data.FromStation[j] != "Start"
@@ -185,8 +224,8 @@ end
 
 # C. Define how many units of each type are decoupled and coupled in a connection
 for m in 1:M, n in 1:N
-    @constraint(model, v1[m, n] == sum(coupled_dict[(m, c1, c2)] * x[c1, c2, n] for c1 in 1:C, c2 in 1:C))
-    @constraint(model, v2[m, n] == sum(decoupled_dict[(m, c1, c2)] * x[c1, c2, n] for c1 in 1:C, c2 in 1:C))
+    @constraint(model, v1[m, n] == sum(coupled_dict[(m, c1, c2)] * x[(c1, c2, n)] for (c1, c2) in feasible_pairs[n]))
+    @constraint(model, v2[m, n] == sum(decoupled_dict[(m, c1, c2)] * x[(c1, c2, n)] for (c1, c2) in feasible_pairs[n]))
 end
 
 # D. Demand Coverage
@@ -214,13 +253,6 @@ for n in 1:N
     end
 end
 
-# H. Define v_happening variables
-for n in 1:N
-    @constraint(model, v1_happening[n]*5 >= sum(v1[m, n] for m in 1:M))
-    @constraint(model, v2_happening[n]*5 >= sum(v2[m, n] for m in 1:M))
-    # @constraint(model, v1_happening[n] + v2_happening[n] <= 1) # only coupling or decoupling can happen, not both
-end
-
 # Solve the model
 optimize!(model)
 
@@ -228,7 +260,7 @@ optimize!(model)
 println("\n--- OPTIMIZATION RESULTS ---")
 println("Status: ", termination_status(model))
 
-if termination_status(model) == OPTIMAL
+if has_values(model) # also save the best solution found if the time limit is reached
     println("Total Cost: \$", round(objective_value(model), digits=2))
 
     # Collect assignments
@@ -242,7 +274,8 @@ if termination_status(model) == OPTIMAL
         Arrival = Int[],
         Demand = Int[],
         Distance = Float64[],
-        Composition = String[]
+        Composition = String[],
+        OrderedComposition = String[]
     )
 
     for j in 1:J
@@ -259,7 +292,8 @@ if termination_status(model) == OPTIMAL
                     Arrival = timetable_data.ArrivalToStation[j],
                     Demand = timetable_data.Demand[j],
                     Distance = timetable_data.Distance_KM[j],
-                    Composition = string(compositions[c])
+                    Composition = normalized_names[c],
+                    OrderedComposition = compositions[c]
                 ))
             end
         end
@@ -327,7 +361,7 @@ if termination_status(model) == OPTIMAL
     gap = try relative_optimality_gap(model) catch; "N/A" end
 
     km_costs_val = km_buff * sum(value(y[c, j]) * comp_costs[c] * timetable_data.Distance_KM[j] for c in 1:C, j in 1:J)
-    coupling_costs_val = sum((value(v1_happening[n]) + value(v2_happening[n])) * v_penalty for n in actual_connections)
+    coupling_costs_val = sum(value(shunting[n]) * v_penalty for n in actual_connections)
     balance_costs_val = sum((value(balance_shortage[m, s]) + value(balance_excess[m, s])) * end_of_day_penalty for m in 1:M, s in 1:S)
     extra_unit_costs_val = sum(value(extra_units[m, s]) * extra_unit_penalty for m in 1:M, s in 1:S)
     format_output(val, total) = "$(round(val, digits=2)) ($(round((val / total) * 100, digits=2))%)"
@@ -347,6 +381,7 @@ if termination_status(model) == OPTIMAL
         write(f, "- end_of_day_penalty: $end_of_day_penalty\n")
         write(f, "- extra_unit_penalty: $extra_unit_penalty\n")
         write(f, "- km_buff: $km_buff\n")
+        write(f, "- solver: $solver (time limit $time_limit s)\n")
         write(f, "- Based on data from: $execution_file\n")
         write(f, "------------------------------------------\n")
         write(f, "Objective Function Breakdown:\n")

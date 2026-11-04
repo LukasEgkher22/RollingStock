@@ -1,0 +1,4 @@
+* SHUNTING CODES: (not for all train systems)
+    For the station AHRHUS, there is a shunting code available.
+    But only for the train systems IC100 and L0.
+    What about the other train systems? Are there shunting codes available for them as well?

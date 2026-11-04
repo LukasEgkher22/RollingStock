@@ -947,6 +947,11 @@ function pre_merge_train_ids(df::DataFrame; save_to_csv::Bool = false, filename:
         ("NÆ/86", "KK/86", "KB/86")
     ])
 
+    # connections (LastFrom of A, LastTo of A, FirstTo of B) that should never be merged
+    disallowed_connections = Set([
+        ("OD/86", "ES/86", "FA/86")
+    ])
+
     # 1. Summarize TrainId extents
     train_extents = combine(groupby(df, :TrainId)) do subdf
         sdf = sort(subdf, :DepartureFromStation)
@@ -985,9 +990,11 @@ function pre_merge_train_ids(df::DataFrame; save_to_csv::Bool = false, filename:
                0 <= (rowB.FirstDeparture - rowA.LastArrival) <= max_time_gap &&
                rowA.Category == rowB.Category && rowA.Category != "M" &&
                (   rowA.Parity == rowB.Parity 
-                    # || (string(rowA.LastFrom), string(rowA.LastTo), string(rowB.FirstTo)) in allowed_combinations
-               )
-                
+                    || (string(rowA.LastFrom), string(rowA.LastTo), string(rowB.FirstTo)) in allowed_combinations
+
+               ) &&
+               !((string(rowA.LastFrom), string(rowA.LastTo), string(rowB.FirstTo)) in disallowed_connections)
+
                 push!(all_possible_edges, (src=rowA.TrainId, dst=rowB.TrainId))
                 out_degree[rowA.TrainId] += 1
                 in_degree[rowB.TrainId] += 1
