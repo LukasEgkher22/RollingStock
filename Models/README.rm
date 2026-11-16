@@ -1,9 +1,17 @@
-There are three main files for composition models in this folder:
-- Main_simpleModel.jl: This file contains the main model code for a simple composition model
-- Main_unitPresentation.jl: This file extends the simple model code by providing unit presentation 
-- Main_includingGGV.jl: This file contains the main model code inclduing GGVs
+Model scripts (run from the project root, results go to Results/Analysis)
 
-The file Main_assignUnits.jl contains the code for the second model run, where units are assigned to the compositions from the first model run.
-The composition result on which the unit assignment should be done, has to be specified in the code.
+Composition model (Julia, functions in FinalModel_functions.jl and CompositionModel_functions.jl):
+- Main_base.jl: base scenario (aggregated_trips.csv)
+- Main_GGV.jl: GGV scenario (aggregated_trips_merged_GGV.csv), the GGV rules can be switched on one by one
+- Main_compareScenarios.jl, Main_Mtrains.jl, Main_parking.jl: scenario comparisons (several runs)
 
-CompositionModel_functions.jl contains functions that are used in the main model files
+Unit assignment (post-solution step):
+- Main_assignUnits.py: assigns physical units (e.g. ICA_12) to the compositions of a result and checks the
+  assignment against the model (functions in AssignUnits_functions.py). By default it takes the newest result.
+  It follows the UnitFlows file that write_results writes with every result.
+- Export_unitFlows.jl <scenario> <timestamp>: writes the UnitFlows file for results solved before it existed.
+
+Diagrams of a result: Visualization/Main_diagrams.py
+
+Archive: old models with their own model code (simple model, unit preservation, old GGV model) and an old
+test script. They are not maintained and their paths assume they are in Models/.

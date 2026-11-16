@@ -804,6 +804,46 @@ function aggregate_train_trips(merged_data::DataFrame, config_path::String; save
 end
 
 """
+Finds all trip pairs (A, B) where units of train A can continue directly on train B.
+
+Trip B departs from the station where trip A arrives, within `max_time_gap` minutes, in the same
+direction (same parity of the train numbers, or a listed exception) and without going back.
+
+# Arguments
+- `df::DataFrame`: The aggregated trip data
+- `max_time_gap::Int`: The maximum allowed time gap (in minutes) between arrival and departure
+
+# Returns
+- `Vector{Tuple{Int, Int}}`: Row numbers (trip A, trip B) in `df`
+"""
+function find_ggv_trip_links(df::DataFrame; max_time_gap::Int = 20)
+    allowed_combinations = Set([
+        ("KH/86", "FA/86", "ES/86"),
+        ("NF/86", "KH/86", "KB/86"),
+        ("KB/86", "KK/86", "NÆ/86"),
+        ("NÆ/86", "KK/86", "KB/86")
+    ])
+
+    links = Tuple{Int, Int}[]
+    for a in 1:nrow(df), b in 1:nrow(df)
+        df.ToStation[a] == df.FromStation[b] || continue
+        df.TrainId[a] != df.TrainId[b] || continue
+        df.TrainCategory[a] == df.TrainCategory[b] || continue
+        df.TrainCategory[a] != "M" || continue
+        0 <= (df.DepartureFromStation[b] - df.ArrivalToStation[a]) <= max_time_gap || continue
+        df.FromStation[a] != df.ToStation[b] || continue # no backtracking
+        (df.FromStation[a] != "Start" && df.ToStation[b] != "End") || continue
+
+        same_parity = (get_id_part(df.TrainId[a], :last) % 2) == (get_id_part(df.TrainId[b], :first) % 2)
+        if same_parity || (string(df.FromStation[a]), string(df.ToStation[a]), string(df.ToStation[b])) in allowed_combinations
+            push!(links, (a, b))
+        end
+    end
+    return links
+end
+
+
+"""
 Identifies and labels groups of connected trains (GGVs) based on shared station transitions.
 
 This function identifies "webs" of connectivity where different TrainIds meet, split, or 
@@ -822,43 +862,11 @@ unique `GGVId` string to all participating TrainIds in a connected component.
   the interconnected train groups.
 """
 function add_GGV_column(df::DataFrame; save_to_csv::Bool = false, filename::String = "aggregated_trips_GGVId.csv", max_time_gap::Int = 20)
-    # 1. Setup and Business Rules
-    allowed_combinations = Set([
-        ("KH/86", "FA/86", "ES/86"),
-        ("NF/86", "KH/86", "KB/86"), 
-        ("KB/86", "KK/86", "NÆ/86"),
-        ("NÆ/86", "KK/86", "KB/86")
-    ])
-
+    # 1. Identify all valid pairwise connections (A -> B)
     # This set will store pairs of TrainIds that are connected
     # Using a Set of Tuples ensures we don't store duplicates
-    edges = Set{Tuple{Any, Any}}()
+    edges = Set{Tuple{Any, Any}}((df.TrainId[a], df.TrainId[b]) for (a, b) in find_ggv_trip_links(df; max_time_gap = max_time_gap))
     all_train_ids = unique(df.TrainId)
-
-    # 2. Identify all valid pairwise connections (A -> B)
-    # We iterate through the dataframe to find which TrainIds "touch" each other
-    for rowA in eachrow(df)
-        for rowB in eachrow(df)
-
-            parity_id_A = get_id_part(rowA.TrainId, :last)
-            parity_id_B = get_id_part(rowB.TrainId, :first)
-
-            same_station = rowA.ToStation == rowB.FromStation
-            different_trains = rowA.TrainId != rowB.TrainId
-            same_category = rowA.TrainCategory == rowB.TrainCategory
-            departure_after_arrival = 0 <= (rowB.DepartureFromStation - rowA.ArrivalToStation) <= max_time_gap
-            no_backtracking = rowA.FromStation != rowB.ToStation
-            no_materialization = rowA.FromStation != "Start" && rowB.ToStation != "End"
-            odd_even_check = (parity_id_A % 2) == (parity_id_B % 2) || (string(rowA.FromStation), string(rowA.ToStation), string(rowB.ToStation)) in allowed_combinations
-            not_category_M = rowA.TrainCategory != "M"
-
-
-            if same_station && different_trains && departure_after_arrival && no_backtracking && no_materialization && odd_even_check && same_category && not_category_M
-                # Add a connection between these two IDs
-                push!(edges, (rowA.TrainId, rowB.TrainId))
-            end
-        end
-    end
 
     # 3. Build an Adjacency List to find groups (Connected Components)
     # This handles merges (A&B -> C) and splits (C -> D&E)

@@ -1,0 +1,33 @@
+------------------------------------------
+SCENARIO: GGV
+------------------------------------------
+Data: aggregated_trips_merged_GGV.csv (1004 trips, 269 connections, 0 material train candidates)
+- stages: units > operating
+- add_mtrain_candidates: false
+- joint_shunting: true
+- solver: Gurobi
+- mip_gap: 0.005
+- time_limit: 1800
+- ggv_constraints: false
+- demand_factor: 1.0
+- parking: fixed
+- realloc_train_ends: false
+- max_storage_time: nothing
+- main_unit_type: true
+------------------------------------------
+Lexicographic stages:
+  1. units        value 405830.99, bound 405432.53, OPTIMAL, 1006.7 s
+  2. operating    value 5469.81, bound 5453.19, OPTIMAL, 629.3 s
+------------------------------------------
+Key figures:
+  Scenario     GGV
+  Status       OPTIMAL
+  Runtime      1636.0
+  ExtraUnits   4
+  Balance      0
+  Relocations  0
+  NewMTrains   0
+  NewMTrainKm  0.0
+  KmCost       4.9698056e6
+  ShuntingOps  5
+  IdleUnits    1

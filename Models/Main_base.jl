@@ -7,7 +7,7 @@ solver = "Gurobi"   # "Gurobi" (needs a license) or "HiGHS" (free)
 mip_gap = 0.005     # 0.5% optimality gap
 time_limit = 1800   # in seconds, per lexicographic stage
 
-# for the GGV model use "aggregated_trips_merged_GGV.csv" and ggv_constraints = true
+# for the GGV model see Main_GGV.jl
 execution_file = "aggregated_trips.csv"
 ggv_constraints = false
 demand_factor = 1.0 # required seats = demand_factor * demand

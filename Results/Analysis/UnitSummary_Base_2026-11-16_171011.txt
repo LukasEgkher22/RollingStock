@@ -1,0 +1,30 @@
+--- Unit assignment: Base 2026-11-16_171011 ---
+Generated: 2026-11-16 17:10:20
+Choice from the inventory: fifo
+
+Checks:
+  [OK] Every position has a unit of the right type (1307 positions)
+  [OK] UnitFlows: one source and one destination per position
+  [OK] Unit paths are continuous
+  [OK] Reallocation times respected (867 depot visits during the day)
+  [OK] Start and end inventory equal the model (171 units used, 174 in total)
+  [OK] No missing units (inventory never negative)
+  [OK] Shunting operations equal the model (2)
+
+Units in total: 174, used: 171
+  EB15Talgo: 7
+  EB4DD: 10
+  EB5DD: 10
+  ERF: 37
+  ICA: 75
+  ICU: 5
+  MGA: 30
+Unit cost: 1,555,000
+Kilometer cost: 3,900,220.9 (model KmCost: 3.9002209e6)
+
+Unit positions by source:
+  depot: 1038
+  continue: 269
+
+Trips per used unit: min 1, max 15
+Km per used unit: min 36, median 933, max 1571

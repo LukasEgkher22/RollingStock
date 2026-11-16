@@ -1,0 +1,30 @@
+------------------------------------------
+SCENARIO: Base
+------------------------------------------
+Data: aggregated_trips.csv (1004 trips, 119 connections, 0 material train candidates)
+- stages: units > operating
+- add_mtrain_candidates: false
+- solver: Gurobi
+- mip_gap: 0.005
+- time_limit: 1800
+- ggv_constraints: false
+- demand_factor: 1.0
+- parking: fixed
+- realloc_train_ends: false
+------------------------------------------
+Lexicographic stages:
+  1. units        value 104100.72, bound 104089.55, OPTIMAL, 72.5 s
+  2. operating    value 4100.22, bound 4080.64, OPTIMAL, 12.7 s
+------------------------------------------
+Key figures:
+  Scenario     Base
+  Status       OPTIMAL
+  Runtime      85.3
+  ExtraUnits   1
+  Balance      0
+  Relocations  0
+  NewMTrains   0
+  NewMTrainKm  0.0
+  KmCost       3.9002209e6
+  ShuntingOps  2
+  IdleUnits    11

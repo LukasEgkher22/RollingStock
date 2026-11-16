@@ -1,0 +1,34 @@
+--- Unit assignment: GGV 2026-11-08_214855 ---
+Generated: 2026-11-16 17:06:58
+Choice from the inventory: fifo
+
+Checks:
+  [OK] Every position has a unit of the right type (1438 positions)
+  [OK] UnitFlows: one source and one destination per position
+  [OK] Unit paths are continuous
+  [OK] Reallocation times respected (465 depot visits during the day)
+  [OK] GGV link blocks move directly from A to B (134 links)
+  [OK] Stored trains continue as a whole (101 stored trains)
+  [OK] Start and end inventory equal the model (249 units used, 268 in total)
+  [OK] No missing units (inventory never negative)
+  [OK] Shunting operations equal the model (40)
+
+Units in total: 268, used: 249
+  EB15Talgo: 21
+  EB4DD: 19
+  EB5DD: 10
+  ERF: 56
+  ICA: 109
+  ICU: 21
+  MGA: 32
+Unit cost: 2,400,000
+Kilometer cost: 4,421,871.7 (model KmCost: 4.4218717e6)
+
+Unit positions by source:
+  depot: 714
+  continue: 484
+  link: 134
+  stored: 106
+
+Trips per used unit: min 1, max 12
+Km per used unit: min 2, median 619, max 1518
